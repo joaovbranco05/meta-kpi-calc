@@ -1,0 +1,4 @@
+interface:
+  display_name: "Meta KPI Calculator Dev"
+  short_description: "Desenvolvimento disciplinado do Meta KPI"
+  default_prompt: "Use $meta-kpi-calculator-dev para implementar a próxima etapa liberada do projeto."
