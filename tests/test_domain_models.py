@@ -46,6 +46,7 @@ def test_insight_preserves_decimal_and_json(
                 date_start=date(2026, 9, 1),
                 date_stop=date(2026, 9, 1),
                 spend=Decimal("123.45"),
+                qualified_leads=2,
                 frequency=Decimal("1.234567"),
                 raw_actions=[{"action_type": "lead", "value": "2"}],
                 raw_response={"source": "test"},
@@ -58,8 +59,42 @@ def test_insight_preserves_decimal_and_json(
         assert insight is not None
         assert insight.spend == Decimal("123.45")
         assert insight.frequency == Decimal("1.234567")
+        assert insight.qualified_leads == 2
         assert insight.raw_actions == [{"action_type": "lead", "value": "2"}]
         assert insight.raw_response == {"source": "test"}
+
+
+def test_qualified_leads_is_nullable_and_rejects_negative_values(
+    migrated_database: tuple[Settings, Database],
+) -> None:
+    _, database = migrated_database
+    with database.session_factory.begin() as session:
+        campaign = add_campaign(session)
+        session.add(
+            CampaignInsight(
+                campaign_id=campaign.id,
+                date_start=date(2026, 9, 1),
+                date_stop=date(2026, 9, 1),
+                qualified_leads=None,
+            )
+        )
+
+    with database.session_factory() as session:
+        insight = session.scalar(select(CampaignInsight))
+        assert insight is not None
+        assert insight.qualified_leads is None
+
+    with pytest.raises(IntegrityError):
+        with database.session_factory.begin() as session:
+            campaign = add_campaign(session, "negative-qualified")
+            session.add(
+                CampaignInsight(
+                    campaign_id=campaign.id,
+                    date_start=date(2026, 9, 2),
+                    date_stop=date(2026, 9, 2),
+                    qualified_leads=-1,
+                )
+            )
 
 
 def test_natural_keys_are_unique(

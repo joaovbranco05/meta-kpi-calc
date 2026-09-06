@@ -47,6 +47,12 @@ def test_demo_seed_is_deterministic_and_idempotent(
                 EnrollmentRecord.paying_enrollments == 0,
             )
         )
+        qualified_insights = session.scalar(
+            select(func.count(CampaignInsight.id)).where(
+                CampaignInsight.qualified_leads.is_not(None),
+                CampaignInsight.qualified_leads <= CampaignInsight.leads,
+            )
+        )
 
     assert {campaign.meta_campaign_id for campaign in campaigns} == {
         values["meta_campaign_id"] for values in DEMO_CAMPAIGNS
@@ -56,6 +62,7 @@ def test_demo_seed_is_deterministic_and_idempotent(
     assert len(enrollment_keys) == len(set(enrollment_keys)) == 3
     assert zero_leads == 3
     assert zero_enrollments == 1
+    assert qualified_insights == 21
 
 
 def test_demo_seed_refuses_real_mode_without_creating_database(tmp_path: Path) -> None:
