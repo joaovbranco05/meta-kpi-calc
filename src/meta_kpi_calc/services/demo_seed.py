@@ -98,6 +98,9 @@ def seed_demo(settings: Settings) -> dict[str, int]:
                     insight.clicks = clicks
                     insight.inline_link_clicks = clicks - 5
                     insight.leads = 0 if day_offset == 0 else campaign_number + day_offset
+                    insight.qualified_leads = (
+                        0 if insight.leads == 0 else max(1, insight.leads - 1)
+                    )
                     insight.frequency = Decimal("1.250000")
                     insight.meta_ctr = (
                         Decimal(clicks) / Decimal(impressions) * Decimal("100")

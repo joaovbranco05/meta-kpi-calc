@@ -127,6 +127,10 @@ class CampaignInsight(Base):
         ),
         CheckConstraint("leads >= 0", name="ck_campaign_insights_leads_nonnegative"),
         CheckConstraint(
+            "qualified_leads IS NULL OR qualified_leads >= 0",
+            name="ck_campaign_insights_qualified_leads_nonnegative",
+        ),
+        CheckConstraint(
             "frequency IS NULL OR frequency >= 0",
             name="ck_campaign_insights_frequency_nonnegative",
         ),
@@ -163,6 +167,7 @@ class CampaignInsight(Base):
         Integer, nullable=False, default=0, server_default="0"
     )
     leads: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    qualified_leads: Mapped[int | None] = mapped_column(Integer)
     frequency: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
     meta_ctr: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
     meta_cpc: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
