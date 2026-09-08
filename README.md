@@ -4,11 +4,12 @@ Aplicação local para consolidar métricas de campanhas da Meta e calcular KPIs
 de investimento, leads e matrículas da RCTEC, FECAF Florianópolis e Curso com
 Bolsa.
 
-Esta entrega contém as etapas 0 a 5: contrato do MVP, configuração,
+Esta entrega contém as etapas 0 a 6: contrato do MVP, configuração,
 infraestrutura SQLite/Alembic, endpoint de saúde, modelos de domínio, dados
 fictícios, serviço interno de KPIs, cliente Meta mock-first e serviço interno de
-sincronização com agendamento opcional. Ainda não há composição que faça
-chamadas reais à Meta, endpoints de indicadores ou painel funcional.
+sincronização com agendamento opcional, além da API REST local para conexão,
+sincronização, campanhas, Insights e matrículas. Não há dashboard, exportação,
+painel funcional ou integração com BotConversa nesta entrega.
 
 ## Requisitos
 
@@ -138,11 +139,37 @@ Datas de campanha com offset explícito são normalizadas para UTC antes do
 SQLite, evitando comparação de relógios locais como se fossem instantes.
 
 O lock é local ao processo, não distribuído. O scheduler opcional registra um
-único job intervalar `meta-sync`, com `coalesce=True` e `max_instances=1`, mas
-não é iniciado automaticamente. Quando ele for ativado pelo futuro ponto de
-composição, execute o Uvicorn com exatamente um worker e sem `--reload`.
-Nenhuma chamada real à Meta foi realizada; sincronização e scheduler foram
-validados somente com mocks. A etapa 6 está liberada, mas ainda não foi
-implementada.
+único job intervalar `meta-sync`, com `coalesce=True` e `max_instances=1`. O
+lifecycle da API inicia e encerra o scheduler somente quando ele está habilitado
+e a configuração real está completa. Nesse modo, execute o Uvicorn com
+exatamente um worker e sem `--reload`. O mesmo lifecycle fecha apenas o cliente
+HTTP criado pela própria aplicação; um cliente injetado continua pertencendo ao
+chamador. Nenhuma chamada real à Meta foi realizada; sincronização, scheduler e
+lifecycle foram validados somente com mocks.
+
+## API REST local
+
+Além de `GET /health`, a etapa 6 expõe nove operações:
+
+- `GET /api/meta/connection` e `POST /api/meta/sync`;
+- `GET /api/campaigns`, `GET /api/campaigns/{campaign_id}` e
+  `PATCH /api/campaigns/{campaign_id}/classification`;
+- `GET /api/campaigns/{campaign_id}/insights`;
+- `POST /api/enrollments`, `GET /api/enrollments` e
+  `PUT /api/enrollments/{record_id}`.
+
+As rotas usam a PK interna e também expõem `meta_campaign_id`. Listagens usam
+`items`, `total`, `offset` e `limit`, com filtros conjuntivos e ordem estável.
+Campos brutos da Meta nunca são retornados. Datas usam ISO e valores monetários
+continuam `Decimal` nos schemas. Inteiros dos bodies e `active_only` são
+estritos: strings, floats e booleanos usados como contagem são rejeitados sem
+coerção. Erros possuem códigos e mensagens fixos, sem ecoar token, payload,
+URL ou exceção externa.
+
+Em demo ou sem credenciais completas, o diagnóstico de conexão retorna 200 sem
+I/O externo. A verificação Meta ocorre somente por requisição explícita em modo
+real configurado. Todos os testes da API usaram mocks; nenhuma conexão real foi
+executada. Dashboard, resumo de KPIs, exportação, Streamlit e BotConversa estão
+fora da etapa 6.
 
 As decisões congeladas, a matriz de aceite e o andamento ficam em `docs/`.
