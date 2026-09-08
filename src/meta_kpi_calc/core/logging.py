@@ -37,7 +37,7 @@ def redact_text(value: str, secrets: Sequence[str] = ()) -> str:
 def redact_data(value: Any, secrets: Sequence[str] = ()) -> Any:
     if isinstance(value, Mapping):
         return {
-            key: (
+            (redact_text(key, secrets) if isinstance(key, str) else key): (
                 REDACTED
                 if str(key).lower() in SENSITIVE_KEYS
                 else redact_data(item, secrets)

@@ -12,6 +12,16 @@ from sqlalchemy.engine import URL, make_url
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
+def normalize_meta_ad_account_id(value: str) -> str:
+    normalized = value.strip()
+    numeric_id = normalized[4:] if normalized.startswith("act_") else normalized
+    if not numeric_id.isdigit():
+        raise ValueError(
+            "META_AD_ACCOUNT_ID must contain digits, optionally prefixed by act_"
+        )
+    return f"act_{numeric_id}"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
@@ -43,7 +53,7 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = False
     sync_interval_minutes: int = Field(default=60, gt=0)
     sync_lookback_days: int = Field(default=7, ge=1)
-    max_sync_days: int = Field(default=31, ge=1, le=366)
+    max_sync_days: int = Field(default=31, ge=1, le=31)
     api_base_url: HttpUrl = HttpUrl("http://127.0.0.1:8000")
 
     @field_validator("app_timezone")
@@ -71,12 +81,7 @@ class Settings(BaseSettings):
         normalized = str(value).strip()
         if not normalized:
             return None
-        numeric_id = normalized[4:] if normalized.startswith("act_") else normalized
-        if not numeric_id.isdigit():
-            raise ValueError(
-                "META_AD_ACCOUNT_ID must contain digits, optionally prefixed by act_"
-            )
-        return f"act_{numeric_id}"
+        return normalize_meta_ad_account_id(normalized)
 
     @field_validator("log_level")
     @classmethod
