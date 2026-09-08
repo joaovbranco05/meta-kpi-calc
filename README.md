@@ -4,12 +4,12 @@ Aplicação local para consolidar métricas de campanhas da Meta e calcular KPIs
 de investimento, leads e matrículas da RCTEC, FECAF Florianópolis e Curso com
 Bolsa.
 
-Esta entrega contém as etapas 0 a 6: contrato do MVP, configuração,
+Esta entrega contém as etapas 0 a 7: contrato do MVP, configuração,
 infraestrutura SQLite/Alembic, endpoint de saúde, modelos de domínio, dados
 fictícios, serviço interno de KPIs, cliente Meta mock-first e serviço interno de
 sincronização com agendamento opcional, além da API REST local para conexão,
-sincronização, campanhas, Insights e matrículas. Não há dashboard, exportação,
-painel funcional ou integração com BotConversa nesta entrega.
+sincronização, campanhas, Insights, matrículas, dashboard, exportação e painel
+Streamlit. Não há integração com BotConversa nesta entrega.
 
 ## Requisitos
 
@@ -169,7 +169,31 @@ URL ou exceção externa.
 Em demo ou sem credenciais completas, o diagnóstico de conexão retorna 200 sem
 I/O externo. A verificação Meta ocorre somente por requisição explícita em modo
 real configurado. Todos os testes da API usaram mocks; nenhuma conexão real foi
-executada. Dashboard, resumo de KPIs, exportação, Streamlit e BotConversa estão
-fora da etapa 6.
+executada.
+
+## Dashboard, exportação e painel
+
+`GET /api/dashboard/summary` exige `date_start` e `date_stop` e aceita os filtros
+conjuntivos opcionais `brand`, `campaign_id`, `course` e `effective_status`.
+`course` representa a classificação da campanha, não o curso do registro de
+matrícula. O endpoint devolve totais, KPIs e avisos já calculados pelo serviço
+interno, inclusive métricas não calculáveis como `null`.
+
+`GET /api/export` exige os mesmos filtros, além de `format=csv|xlsx` e
+`dataset=performance|enrollments`. CSV contém apenas o dataset solicitado em
+UTF-8-SIG; XLSX produz sempre as abas `Resumo`, `Diário`, `Matrículas` e
+`Campanhas`. Textos iniciados por `=`, `+`, `-` ou `@` são neutralizados antes da
+exportação e campos brutos da Meta não aparecem.
+
+Com a API em execução, inicie o painel local:
+
+```bash
+streamlit run frontend/app.py
+```
+
+O painel usa exclusivamente `API_BASE_URL` (por padrão
+`http://127.0.0.1:8000`), mostra um banner em demonstração e trata API vazia ou
+indisponível sem exibir traceback. Não lê SQLite diretamente nem executa chamadas
+Meta por conta própria.
 
 As decisões congeladas, a matriz de aceite e o andamento ficam em `docs/`.
