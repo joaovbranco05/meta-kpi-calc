@@ -1,10 +1,14 @@
 """Local REST endpoints over the existing domain services and models."""
 
 import logging
+from csv import DictWriter
 from datetime import date
+from io import BytesIO, StringIO
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import Response
+from openpyxl import Workbook
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -12,12 +16,17 @@ from sqlalchemy.orm import Session
 from meta_kpi_calc.api.dependencies import get_session
 from meta_kpi_calc.api.schemas import (
     AccountResponse,
+    CalculatedKpisResponse,
     CampaignResponse,
     ClassificationPatch,
     ConnectionResponse,
+    DashboardFiltersResponse,
+    DashboardSummaryResponse,
     EnrollmentResponse,
     EnrollmentWrite,
     InsightResponse,
+    KpiTotalsResponse,
+    KpiWarningResponse,
     Page,
     SyncRequest,
     SyncResponse,
@@ -29,6 +38,13 @@ from meta_kpi_calc.db.models import (
     EnrollmentRecord,
 )
 from meta_kpi_calc.services.meta_client import MetaClientError
+from meta_kpi_calc.services.kpi_service import summarize_kpis
+from meta_kpi_calc.services.report_filters import ReportFilters
+from meta_kpi_calc.services.report_service import (
+    report_campaigns,
+    report_enrollments,
+    report_insights,
+)
 from meta_kpi_calc.services.sync_service import SyncServiceError
 
 logger = logging.getLogger(__name__)
@@ -115,6 +131,87 @@ def _validate_period(date_start: date | None, date_stop: date | None) -> None:
         _error(422, "validation_error", "Request validation failed.")
 
 
+def _report_filters(
+    date_start: date,
+    date_stop: date,
+    brand: CampaignBrand | None,
+    campaign_id: int | None,
+    course: str | None,
+    effective_status: str | None,
+) -> ReportFilters:
+    _validate_period(date_start, date_stop)
+    if course is not None:
+        course = course.strip()
+        if not course:
+            _error(422, "validation_error", "Request validation failed.")
+    if effective_status is not None:
+        effective_status = effective_status.strip()
+        if not effective_status:
+            _error(422, "validation_error", "Request validation failed.")
+    return ReportFilters(
+        date_start=date_start,
+        date_stop=date_stop,
+        brand=brand,
+        campaign_id=campaign_id,
+        course=course,
+        effective_status=effective_status,
+    )
+
+
+def _dashboard_summary(
+    session: Session, filters: ReportFilters
+) -> DashboardSummaryResponse:
+    summary = summarize_kpis(
+        session,
+        filters.date_start,
+        filters.date_stop,
+        campaign_id=filters.campaign_id,
+        brand=filters.brand,
+        course=filters.course,
+        effective_status=filters.effective_status,
+    )
+    return DashboardSummaryResponse(
+        filters=DashboardFiltersResponse(**vars(filters)),
+        totals=KpiTotalsResponse(**vars(summary.totals)),
+        kpis=CalculatedKpisResponse(**vars(summary.kpis)),
+        warnings=[KpiWarningResponse(**vars(warning)) for warning in summary.warnings],
+    )
+
+
+def _safe_export_value(value: object) -> object:
+    if isinstance(value, str) and value.startswith(("=", "+", "-", "@")):
+        return f"'{value}"
+    return value
+
+
+def _write_sheet(workbook: Workbook, title: str, rows: list[dict[str, object]]) -> None:
+    sheet = workbook.create_sheet(title)
+    if not rows:
+        return
+    headers = list(dict.fromkeys(key for row in rows for key in row))
+    sheet.append(headers)
+    for row in rows:
+        sheet.append([_safe_export_value(row.get(header)) for header in headers])
+
+
+def _export_rows(
+    session: Session, filters: ReportFilters
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+    insight_rows = [
+        _insight_response(insight, campaign.meta_campaign_id).model_dump()
+        for insight, campaign in report_insights(session, filters)
+    ]
+    enrollment_rows = [
+        _enrollment_response(enrollment, campaign.meta_campaign_id).model_dump()
+        for enrollment, campaign in report_enrollments(session, filters)
+    ]
+    campaign_rows = [
+        _campaign_response(campaign).model_dump()
+        for campaign in report_campaigns(session, filters)
+    ]
+    return insight_rows, enrollment_rows, campaign_rows
+
+
 def _meta_configured(request: Request) -> bool:
     settings = request.app.state.settings
     token = settings.meta_access_token
@@ -182,6 +279,8 @@ def list_campaigns(
     session: SessionDependency,
     brand: CampaignBrand | None = None,
     effective_status: str | None = None,
+    campaign_id: int | None = None,
+    course: str | None = None,
     meta_campaign_id: str | None = None,
     offset: Offset = 0,
     limit: Limit = 50,
@@ -191,6 +290,10 @@ def list_campaigns(
         filters.append(Campaign.brand == brand)
     if effective_status is not None:
         filters.append(Campaign.effective_status == effective_status)
+    if campaign_id is not None:
+        filters.append(Campaign.id == campaign_id)
+    if course is not None:
+        filters.append(Campaign.course == course)
     if meta_campaign_id is not None:
         filters.append(Campaign.meta_campaign_id == meta_campaign_id)
     total = session.scalar(select(func.count(Campaign.id)).where(*filters)) or 0
@@ -388,3 +491,95 @@ def replace_enrollment(
         return response
     except IntegrityError:
         _error(409, "duplicate_enrollment", "Enrollment already exists.")
+
+
+@router.get("/dashboard/summary", response_model=DashboardSummaryResponse)
+def dashboard_summary(
+    session: SessionDependency,
+    date_start: date,
+    date_stop: date,
+    brand: CampaignBrand | None = None,
+    campaign_id: int | None = None,
+    course: str | None = None,
+    effective_status: str | None = None,
+) -> DashboardSummaryResponse:
+    filters = _report_filters(
+        date_start,
+        date_stop,
+        brand,
+        campaign_id,
+        course,
+        effective_status,
+    )
+    return _dashboard_summary(session, filters)
+
+
+@router.get("/export")
+def export_report(
+    session: SessionDependency,
+    date_start: date,
+    date_stop: date,
+    format: Annotated[str, Query(pattern="^(csv|xlsx)$")],
+    dataset: Annotated[str, Query(pattern="^(performance|enrollments)$")],
+    brand: CampaignBrand | None = None,
+    campaign_id: int | None = None,
+    course: str | None = None,
+    effective_status: str | None = None,
+) -> Response:
+    filters = _report_filters(
+        date_start,
+        date_stop,
+        brand,
+        campaign_id,
+        course,
+        effective_status,
+    )
+    insights, enrollments, campaigns = _export_rows(session, filters)
+    if format == "csv":
+        rows = insights if dataset == "performance" else enrollments
+        output = StringIO(newline="")
+        headers = list(rows[0]) if rows else (
+            list(InsightResponse.model_fields)
+            if dataset == "performance"
+            else list(EnrollmentResponse.model_fields)
+        )
+        writer = DictWriter(output, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(
+            {
+                key: _safe_export_value(value)
+                for key, value in row.items()
+            }
+            for row in rows
+        )
+        filename = f"meta-kpi-{dataset}.csv"
+        return Response(
+            content=output.getvalue().encode("utf-8-sig"),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    summary = _dashboard_summary(session, filters).model_dump()
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    summary_rows = [
+        {"section": "filters", **summary["filters"]},
+        {"section": "totals", **summary["totals"]},
+        {"section": "kpis", **summary["kpis"]},
+        *[{"section": "warning", **warning} for warning in summary["warnings"]],
+    ]
+    _write_sheet(workbook, "Resumo", summary_rows)
+    _write_sheet(workbook, "Diário", insights)
+    _write_sheet(workbook, "Matrículas", enrollments)
+    _write_sheet(workbook, "Campanhas", campaigns)
+    output = BytesIO()
+    workbook.save(output)
+    return Response(
+        content=output.getvalue(),
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        headers={
+            "Content-Disposition": 'attachment; filename="meta-kpi-report.xlsx"'
+        },
+    )

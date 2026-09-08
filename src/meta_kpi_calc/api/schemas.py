@@ -146,6 +146,78 @@ class EnrollmentResponse(EnrollmentWrite):
     updated_at: datetime
 
 
+class DashboardFiltersResponse(ApiModel):
+    date_start: date
+    date_stop: date
+    brand: CampaignBrand | None
+    campaign_id: int | None
+    course: str | None
+    effective_status: str | None
+
+
+class KpiTotalsResponse(ApiModel):
+    spend: Decimal
+    reach: int | None
+    impressions: int
+    clicks: int
+    inline_link_clicks: int
+    leads: int
+    qualified_leads: int | None
+    contracted_enrollments: int
+    paying_enrollments: int
+    cancellations: int
+    expected_revenue: Decimal
+    received_revenue: Decimal
+    meta_ctr: Decimal | None
+    meta_cpc: Decimal | None
+    meta_cpm: Decimal | None
+    frequency: Decimal | None
+    insight_count: int
+
+
+class CalculatedKpisResponse(ApiModel):
+    calculated_ctr: Decimal | None
+    calculated_cpc: Decimal | None
+    calculated_cpm: Decimal | None
+    cpl: Decimal | None
+    contractual_conversion: Decimal | None
+    financial_conversion: Decimal | None
+    contractual_cac: Decimal | None
+    financial_cac: Decimal | None
+    expected_roas: Decimal | None
+    received_roas: Decimal | None
+    received_advertising_roi: Decimal | None
+    qualification_rate: Decimal | None
+    cpql: Decimal | None
+    contract_to_paying_conversion: Decimal | None
+    cancellation_rate: Decimal | None
+    net_enrollments: int
+    net_cac: Decimal | None
+    expected_revenue_per_paying_enrollment: Decimal | None
+    received_revenue_per_paying_enrollment: Decimal | None
+
+
+class KpiWarningResponse(ApiModel):
+    code: str
+    message: str
+    campaign_id: int | None
+    meta_campaign_id: str | None
+    campaign_course: str | None
+    enrollment_course: str | None
+    insight_id: int | None
+    enrollment_record_id: int | None
+    date_start: date | None
+    date_stop: date | None
+    reference_date: date | None
+
+
+class DashboardSummaryResponse(ApiModel):
+    filters: DashboardFiltersResponse
+    totals: KpiTotalsResponse
+    kpis: CalculatedKpisResponse
+    warnings: list[KpiWarningResponse]
+
+
 Item = TypeVar("Item")
 
 
