@@ -20,6 +20,15 @@ def test_redact_data_handles_nested_sensitive_values() -> None:
     assert "abc" not in redacted["nested"][1]
 
 
+def test_redact_data_removes_explicit_secret_from_mapping_keys() -> None:
+    sentinel = "mapping-key-secret"
+
+    redacted = redact_data({sentinel: {"value": 1}}, (sentinel,))
+
+    assert sentinel not in repr(redacted)
+    assert redacted == {REDACTED: {"value": 1}}
+
+
 def test_configured_formatter_never_emits_concrete_token(
     tmp_path, capsys
 ) -> None:
