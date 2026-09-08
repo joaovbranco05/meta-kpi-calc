@@ -15,6 +15,7 @@ from meta_kpi_calc.db.models import (
     CampaignInsight,
     EnrollmentRecord,
 )
+from meta_kpi_calc.services.report_filters import ReportFilters
 
 KPI_PRECISION = Decimal("0.000001")
 ZERO_MONEY = Decimal("0.00")
@@ -155,17 +156,6 @@ def calculate_kpis(totals: KpiTotals) -> CalculatedKpis:
     )
 
 
-def _campaign_filters(
-    campaign_id: int | None, brand: CampaignBrand | None
-) -> tuple[object, ...]:
-    filters: list[object] = []
-    if campaign_id is not None:
-        filters.append(Campaign.id == campaign_id)
-    if brand is not None:
-        filters.append(Campaign.brand == brand)
-    return tuple(filters)
-
-
 def summarize_kpis(
     session: Session,
     date_start: date,
@@ -173,12 +163,22 @@ def summarize_kpis(
     *,
     campaign_id: int | None = None,
     brand: CampaignBrand | None = None,
+    course: str | None = None,
+    effective_status: str | None = None,
 ) -> KpiSummary:
     """Aggregate additive fields for an inclusive period and calculate KPIs."""
     if date_start > date_stop:
         raise ValueError("date_start must be on or before date_stop")
 
-    campaign_filters = _campaign_filters(campaign_id, brand)
+    filters = ReportFilters(
+        date_start=date_start,
+        date_stop=date_stop,
+        campaign_id=campaign_id,
+        brand=brand,
+        course=course,
+        effective_status=effective_status,
+    )
+    campaign_filters = filters.campaign_predicates()
     insight_row = session.execute(
         select(
             func.count(CampaignInsight.id),
