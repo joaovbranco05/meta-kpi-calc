@@ -1,10 +1,15 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from importlib.util import module_from_spec, spec_from_file_location
+from io import BytesIO
+from pathlib import Path
 from unittest.mock import Mock
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
+
 from pydantic import SecretStr, ValidationError
 from sqlalchemy import func, select
 
@@ -631,6 +636,147 @@ def test_default_app_import_and_lifespan_do_not_create_external_client(
     monkeypatch.setattr("meta_kpi_calc.api.app.httpx.Client", http_constructor)
     with TestClient(create_app(base)) as client:
         assert client.get("/health").status_code == 200
-        assert client.get("/api/dashboard/summary").status_code == 404
-        assert client.get("/api/export").status_code == 404
+        assert client.get("/api/dashboard/summary").status_code == 422
+        assert client.get("/api/export").status_code == 422
     http_constructor.assert_not_called()
+
+
+def test_dashboard_and_exports_share_the_same_campaign_scope(
+    migrated_database: tuple[Settings, Database],
+) -> None:
+    settings, database = migrated_database
+    selected = add_campaign(
+        database,
+        "selected",
+        brand=CampaignBrand.RCTEC,
+        course="Administration",
+        effective_status="ACTIVE",
+    )
+    other = add_campaign(
+        database,
+        "other",
+        brand=CampaignBrand.RCTEC,
+        course="Other",
+        effective_status="ACTIVE",
+    )
+    add_insight(database, selected, DAY_1)
+    add_insight(database, other, DAY_1)
+    with database.session_factory.begin() as session:
+        session.add(
+            EnrollmentRecord(
+                campaign_id=selected,
+                reference_date=DAY_1,
+                course="Administration",
+                contracted_enrollments=1,
+                paying_enrollments=1,
+                cancellations=0,
+                expected_revenue=Decimal("10.00"),
+                received_revenue=Decimal("10.00"),
+                contribution_margin=None,
+                notes="=not-a-formula",
+            )
+        )
+
+    params = {
+        "date_start": DAY_1.isoformat(),
+        "date_stop": DAY_1.isoformat(),
+        "brand": "RCTEC",
+        "course": "Administration",
+        "effective_status": "ACTIVE",
+    }
+    with TestClient(create_app(settings)) as client:
+        campaigns = client.get(
+            "/api/campaigns",
+            params={
+                "brand": "RCTEC",
+                "course": "Administration",
+                "effective_status": "ACTIVE",
+            },
+        )
+        assert campaigns.status_code == 200
+        assert [item["id"] for item in campaigns.json()["items"]] == [selected]
+        summary = client.get("/api/dashboard/summary", params=params)
+        assert summary.status_code == 200
+        body = summary.json()
+        assert body["filters"]["course"] == "Administration"
+        assert body["totals"]["spend"] == "12.34"
+        assert body["totals"]["contracted_enrollments"] == 1
+
+        csv_response = client.get(
+            "/api/export", params={**params, "format": "enrollments", "dataset": "enrollments"}
+        )
+        assert csv_response.status_code == 422
+        csv_response = client.get(
+            "/api/export", params={**params, "format": "csv", "dataset": "enrollments"}
+        )
+        assert csv_response.status_code == 200
+        assert csv_response.content.startswith(b"\xef\xbb\xbf")
+        assert "raw_response" not in csv_response.text
+        assert "'=not-a-formula" in csv_response.text
+        assert csv_response.headers["content-disposition"] == (
+            'attachment; filename="meta-kpi-enrollments.csv"'
+        )
+
+        workbook_response = client.get(
+            "/api/export", params={**params, "format": "xlsx", "dataset": "performance"}
+        )
+    assert workbook_response.status_code == 200
+    workbook = load_workbook(BytesIO(workbook_response.content), data_only=False)
+    assert workbook.sheetnames == ["Resumo", "Diário", "Matrículas", "Campanhas"]
+    enrollment_sheet = workbook["Matrículas"]
+    headers = [cell.value for cell in enrollment_sheet[1]]
+    notes_column = headers.index("notes") + 1
+    assert enrollment_sheet.cell(row=2, column=notes_column).value == "'=not-a-formula"
+
+
+def test_dashboard_and_export_reject_invalid_or_blank_filter_values(
+    migrated_database: tuple[Settings, Database],
+) -> None:
+    settings, _ = migrated_database
+    with TestClient(create_app(settings)) as client:
+        for path, params in (
+            ("/api/dashboard/summary", {"date_start": DAY_2, "date_stop": DAY_1}),
+            ("/api/dashboard/summary", {"date_start": DAY_1, "date_stop": DAY_1, "course": "  "}),
+            ("/api/export", {"date_start": DAY_1, "date_stop": DAY_1, "format": "csv", "dataset": "performance", "effective_status": "  "}),
+        ):
+            response = client.get(path, params=params)
+            assert response.status_code == 422
+            assert response.json()["detail"]["code"] == "validation_error"
+
+        empty = client.get(
+            "/api/dashboard/summary",
+            params={"date_start": DAY_1, "date_stop": DAY_1, "course": "absent"},
+        )
+    assert empty.status_code == 200
+    assert empty.json()["totals"]["spend"] == "0.00"
+    assert empty.json()["warnings"] == []
+
+
+def test_frontend_propagates_the_active_scope_to_each_supported_listing() -> None:
+    path = Path(__file__).resolve().parents[1] / "frontend" / "app.py"
+    spec = spec_from_file_location("frontend_app", path)
+    assert spec is not None and spec.loader is not None
+    frontend_app = module_from_spec(spec)
+    spec.loader.exec_module(frontend_app)
+    filters = {
+        "date_start": DAY_1.isoformat(),
+        "date_stop": DAY_2.isoformat(),
+        "brand": "RCTEC",
+        "campaign_id": "7",
+        "course": "Administration",
+        "effective_status": "ACTIVE",
+    }
+    assert frontend_app._campaign_params(filters) == {
+        "limit": 100,
+        "brand": "RCTEC",
+        "campaign_id": "7",
+        "course": "Administration",
+        "effective_status": "ACTIVE",
+    }
+    assert frontend_app._enrollment_params(filters) == {
+        "limit": 100,
+        "date_start": DAY_1.isoformat(),
+        "date_stop": DAY_2.isoformat(),
+        "brand": "RCTEC",
+        "campaign_id": "7",
+    }
