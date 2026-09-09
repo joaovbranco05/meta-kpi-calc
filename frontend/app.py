@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+EFFECTIVE_STATUS_OPTIONS = ("", "ACTIVE", "PAUSED", "ARCHIVED", "DELETED", "DISABLED")
 
 
 def _format_value(value: Any) -> str:
@@ -58,7 +59,11 @@ def _filters(st: Any) -> dict[str, str]:
         brand = st.selectbox("Marca", ["", "RCTEC", "FECAF", "CURSO_COM_BOLSA", "NAO_CLASSIFICADA"])
         campaign_id = st.text_input("ID interno da campanha")
         course = st.text_input("Curso da campanha")
-        effective_status = st.text_input("Status efetivo")
+        effective_status = st.selectbox(
+            "Status efetivo",
+            EFFECTIVE_STATUS_OPTIONS,
+            format_func=lambda value: "Todos" if value == "" else value,
+        )
     result = {"date_start": start.isoformat(), "date_stop": stop.isoformat()}
     for key, value in (("brand", brand), ("campaign_id", campaign_id), ("course", course), ("effective_status", effective_status)):
         if value.strip():
@@ -67,7 +72,14 @@ def _filters(st: Any) -> dict[str, str]:
 
 
 def _campaign_params(filters: dict[str, str]) -> dict[str, str | int]:
-    return {"limit": 100, **{key: value for key, value in filters.items() if key in {"brand", "campaign_id", "course", "effective_status"}}}
+    return {
+        "limit": 100,
+        **{
+            key: value
+            for key, value in filters.items()
+            if key in {"date_start", "date_stop", "brand", "campaign_id", "course", "effective_status"}
+        },
+    }
 
 
 def _enrollment_params(filters: dict[str, str]) -> dict[str, str | int]:

@@ -1,8 +1,9 @@
 """Concrete filters shared by the KPI summary and report data."""
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time, timezone
 
+from sqlalchemy import or_
 from sqlalchemy.sql.elements import ColumnElement
 
 from meta_kpi_calc.db.models import Campaign, CampaignBrand
@@ -29,4 +30,19 @@ class ReportFilters:
             predicates.append(Campaign.course == self.course)
         if self.effective_status is not None:
             predicates.append(Campaign.effective_status == self.effective_status)
+        if self.date_start is not None and self.date_stop is not None:
+            date_start_dt = datetime.combine(self.date_start, time.min, tzinfo=timezone.utc)
+            date_stop_dt = datetime.combine(self.date_stop, time.max, tzinfo=timezone.utc)
+            predicates.append(
+                or_(
+                    Campaign.start_time.is_(None),
+                    Campaign.start_time <= date_stop_dt,
+                )
+            )
+            predicates.append(
+                or_(
+                    Campaign.stop_time.is_(None),
+                    Campaign.stop_time >= date_start_dt,
+                )
+            )
         return tuple(predicates)

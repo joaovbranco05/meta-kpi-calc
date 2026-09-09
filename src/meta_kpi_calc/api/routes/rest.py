@@ -2,7 +2,7 @@
 
 import logging
 from csv import DictWriter
-from datetime import date
+from datetime import date, datetime, time, timezone
 from io import BytesIO, StringIO
 from typing import Annotated
 
@@ -282,20 +282,24 @@ def list_campaigns(
     campaign_id: int | None = None,
     course: str | None = None,
     meta_campaign_id: str | None = None,
+    date_start: date | None = None,
+    date_stop: date | None = None,
     offset: Offset = 0,
     limit: Limit = 50,
 ) -> Page[CampaignResponse]:
+    _validate_period(date_start, date_stop)
+    report_filters = ReportFilters(
+        date_start=date_start,
+        date_stop=date_stop,
+        brand=brand,
+        campaign_id=campaign_id,
+        course=course,
+        effective_status=effective_status,
+    )
     filters = []
-    if brand is not None:
-        filters.append(Campaign.brand == brand)
-    if effective_status is not None:
-        filters.append(Campaign.effective_status == effective_status)
-    if campaign_id is not None:
-        filters.append(Campaign.id == campaign_id)
-    if course is not None:
-        filters.append(Campaign.course == course)
     if meta_campaign_id is not None:
         filters.append(Campaign.meta_campaign_id == meta_campaign_id)
+    filters.extend(report_filters.campaign_predicates())
     total = session.scalar(select(func.count(Campaign.id)).where(*filters)) or 0
     campaigns = session.scalars(
         select(Campaign).where(*filters).order_by(Campaign.id).offset(offset).limit(limit)
