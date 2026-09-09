@@ -55,6 +55,7 @@ def add_campaign(
     brand: CampaignBrand = CampaignBrand.NAO_CLASSIFICADA,
     course: str | None = None,
     effective_status: str = "ACTIVE",
+    start_time: datetime | None = None,
 ) -> int:
     with database.session_factory.begin() as session:
         campaign = Campaign(
@@ -65,6 +66,7 @@ def add_campaign(
             objective="OUTCOME_LEADS",
             brand=brand,
             course=course,
+            start_time=start_time,
         )
         session.add(campaign)
         session.flush()
@@ -352,13 +354,19 @@ def test_campaign_list_detail_filters_pagination_and_classification(
     migrated_database: tuple[Settings, Database],
 ) -> None:
     base, database = migrated_database
-    first_id = add_campaign(database, "meta-1", brand=CampaignBrand.RCTEC)
+    first_id = add_campaign(
+        database,
+        "meta-1",
+        brand=CampaignBrand.RCTEC,
+        start_time=datetime(2026, 9, 3, 10, 0, tzinfo=UTC),
+    )
     second_id = add_campaign(
         database,
         "meta-2",
         brand=CampaignBrand.FECAF,
         course="Law",
         effective_status="PAUSED",
+        start_time=datetime(2026, 9, 20, 10, 0, tzinfo=UTC),
     )
 
     with TestClient(create_app(base)) as client:
@@ -373,6 +381,10 @@ def test_campaign_list_detail_filters_pagination_and_classification(
         assert [item["meta_campaign_id"] for item in filtered.json()["items"]] == [
             "meta-2"
         ]
+        date_filtered = client.get(
+            "/api/campaigns?date_start=2026-09-01&date_stop=2026-09-10"
+        )
+        assert [item["id"] for item in date_filtered.json()["items"]] == [first_id]
         assert client.get(f"/api/campaigns/{first_id}").json()["meta_campaign_id"] == "meta-1"
         assert client.get("/api/campaigns/99999").status_code == 404
 
@@ -758,6 +770,56 @@ def test_frontend_propagates_the_active_scope_to_each_supported_listing() -> Non
     assert spec is not None and spec.loader is not None
     frontend_app = module_from_spec(spec)
     spec.loader.exec_module(frontend_app)
+    assert frontend_app.EFFECTIVE_STATUS_OPTIONS == (
+        "",
+        "ACTIVE",
+        "PAUSED",
+        "ARCHIVED",
+        "DELETED",
+        "DISABLED",
+    )
+    assert "FALSE" not in frontend_app.EFFECTIVE_STATUS_OPTIONS
+
+    class FakeStreamlit:
+        sidebar: "FakeStreamlit"
+
+        def __init__(self, effective_status: str) -> None:
+            self.sidebar = self
+            self.effective_status = effective_status
+
+        def __enter__(self) -> "FakeStreamlit":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def header(self, _label: str) -> None:
+            return None
+
+        def date_input(self, label: str, _default: date | None = None) -> date:
+            return DAY_1 if label == "Início" else DAY_2
+
+        def selectbox(
+            self, label: str, options: tuple[str, ...] | list[str], **kwargs: object
+        ) -> str:
+            if label == "Status efetivo":
+                assert tuple(options) == frontend_app.EFFECTIVE_STATUS_OPTIONS
+                format_func = kwargs["format_func"]
+                assert callable(format_func)
+                assert format_func("") == "Todos"
+                assert format_func("ACTIVE") == "ACTIVE"
+                assert format_func("DISABLED") == "DISABLED"
+                return self.effective_status
+            return ""
+
+        def text_input(self, _label: str) -> str:
+            return ""
+
+    blank_filters = frontend_app._filters(FakeStreamlit(""))
+    assert "effective_status" not in blank_filters
+    active_filters = frontend_app._filters(FakeStreamlit("ACTIVE"))
+    assert active_filters["effective_status"] == "ACTIVE"
+
     filters = {
         "date_start": DAY_1.isoformat(),
         "date_stop": DAY_2.isoformat(),
@@ -768,6 +830,8 @@ def test_frontend_propagates_the_active_scope_to_each_supported_listing() -> Non
     }
     assert frontend_app._campaign_params(filters) == {
         "limit": 100,
+        "date_start": DAY_1.isoformat(),
+        "date_stop": DAY_2.isoformat(),
         "brand": "RCTEC",
         "campaign_id": "7",
         "course": "Administration",

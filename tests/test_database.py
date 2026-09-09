@@ -1,8 +1,10 @@
 from pathlib import Path
+from threading import Barrier, Thread
 
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 from meta_kpi_calc.core.config import Settings
+from meta_kpi_calc.db.models import Campaign
 from meta_kpi_calc.db.session import Database
 
 
@@ -48,3 +50,38 @@ def test_session_generator_always_closes_session(tmp_path: Path) -> None:
 
     assert fake_session.closed is True
     database.engine.dispose()
+
+
+def test_sqlite_allows_two_light_concurrent_writes(
+    migrated_database: tuple[Settings, Database],
+) -> None:
+    _settings, database = migrated_database
+    barrier = Barrier(2)
+    errors: list[Exception] = []
+
+    def write_campaign(meta_campaign_id: str) -> None:
+        try:
+            with database.session_factory.begin() as session:
+                session.add(
+                    Campaign(
+                        meta_campaign_id=meta_campaign_id,
+                        name=f"Campaign {meta_campaign_id}",
+                    )
+                )
+                barrier.wait(timeout=5)
+        except Exception as exc:  # pragma: no cover - assertion shows the error
+            errors.append(exc)
+
+    threads = [
+        Thread(target=write_campaign, args=("concurrent-1",)),
+        Thread(target=write_campaign, args=("concurrent-2",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count(Campaign.id))) == 2

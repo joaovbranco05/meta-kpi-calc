@@ -1,4 +1,5 @@
 import os
+import socket
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -8,6 +9,20 @@ import pytest
 
 from meta_kpi_calc.core.config import Settings
 from meta_kpi_calc.db.session import Database
+
+
+@pytest.fixture(autouse=True)
+def block_real_network(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Make every test fail if it attempts a real TCP connection."""
+    attempts: list[object] = []
+
+    def forbidden_connect(_socket: socket.socket, address: object) -> None:
+        attempts.append(address)
+        raise AssertionError("Real network access is forbidden in the test suite")
+
+    monkeypatch.setattr(socket.socket, "connect", forbidden_connect)
+    yield
+    assert attempts == [], "A test attempted a real TCP connection"
 
 
 @pytest.fixture
