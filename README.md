@@ -4,12 +4,13 @@ Aplicação local para consolidar métricas de campanhas da Meta e calcular KPIs
 de investimento, leads e matrículas da RCTEC, FECAF Florianópolis e Curso com
 Bolsa.
 
-Esta entrega contém as etapas 0 a 7: contrato do MVP, configuração,
+Esta entrega contém as etapas 0 a 8: contrato do MVP, configuração,
 infraestrutura SQLite/Alembic, endpoint de saúde, modelos de domínio, dados
 fictícios, serviço interno de KPIs, cliente Meta mock-first e serviço interno de
 sincronização com agendamento opcional, além da API REST local para conexão,
 sincronização, campanhas, Insights, matrículas, dashboard, exportação e painel
-Streamlit. Não há integração com BotConversa nesta entrega.
+Streamlit e hardening operacional. Não há integração com BotConversa nesta
+entrega.
 
 ## Requisitos
 
@@ -197,3 +198,8 @@ indisponível sem exibir traceback. Não lê SQLite diretamente nem executa cham
 Meta por conta própria.
 
 As decisões congeladas, a matriz de aceite e o andamento ficam em `docs/`.
+O procedimento completo de instalação, migrations, backup, inicialização,
+diagnóstico, scheduler e preparação de uma conexão real está em
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md). A conexão real descrita ali não foi
+executada; o token deve ser inserido diretamente no `.env` local, nunca enviado
+pelo chat.
