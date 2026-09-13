@@ -20,6 +20,7 @@ from meta_kpi_calc.db.models import (
     Campaign,
     CampaignBrand,
     CampaignInsight,
+    CommercialClosure,
     EnrollmentRecord,
     SyncStatus,
 )
@@ -384,7 +385,10 @@ def test_campaign_list_detail_filters_pagination_and_classification(
         date_filtered = client.get(
             "/api/campaigns?date_start=2026-09-01&date_stop=2026-09-10"
         )
-        assert [item["id"] for item in date_filtered.json()["items"]] == [first_id]
+        assert [item["id"] for item in date_filtered.json()["items"]] == [
+            first_id,
+            second_id,
+        ]
         assert client.get(f"/api/campaigns/{first_id}").json()["meta_campaign_id"] == "meta-1"
         assert client.get("/api/campaigns/99999").status_code == 404
 
@@ -453,7 +457,14 @@ def test_enrollment_create_list_replace_conflicts_and_rollback(
     migrated_database: tuple[Settings, Database],
 ) -> None:
     base, database = migrated_database
-    first_campaign = add_campaign(database, "meta-enrollment", brand=CampaignBrand.RCTEC)
+    first_campaign = add_campaign(
+        database,
+        "meta-enrollment",
+        brand=CampaignBrand.RCTEC,
+        # The campaign classification is not the daily launch course.  The
+        # enrollment endpoint must filter the latter.
+        course="Finance",
+    )
     second_campaign = add_campaign(database, "meta-other", brand=CampaignBrand.FECAF)
     first_payload = enrollment_payload(first_campaign)
 
@@ -468,6 +479,7 @@ def test_enrollment_create_list_replace_conflicts_and_rollback(
         duplicate = client.post("/api/enrollments", json=first_payload)
         assert duplicate.status_code == 409
         assert duplicate.json()["detail"]["code"] == "duplicate_enrollment"
+        assert duplicate.json()["detail"]["record_id"] == record_id
         assert "PUT" in duplicate.json()["detail"]["message"]
 
         created_second = client.post(
@@ -535,6 +547,95 @@ def test_enrollment_create_list_replace_conflicts_and_rollback(
         assert session.scalar(select(func.count(EnrollmentRecord.id))) == 2
 
 
+def test_enrollment_course_filter_finds_duplicate_beyond_the_first_page(
+    migrated_database: tuple[Settings, Database],
+) -> None:
+    base, database = migrated_database
+    campaign_id = add_campaign(database, "duplicate-page", course="Finance")
+    with database.session_factory.begin() as session:
+        for index in range(100):
+            session.add(
+                EnrollmentRecord(
+                    campaign_id=campaign_id,
+                    reference_date=DAY_1,
+                    course=f"Course {index}",
+                    contracted_enrollments=0,
+                    paying_enrollments=0,
+                    cancellations=0,
+                    expected_revenue=Decimal("0.00"),
+                    received_revenue=Decimal("0.00"),
+                )
+            )
+        session.add(
+            EnrollmentRecord(
+                campaign_id=campaign_id,
+                reference_date=DAY_1,
+                course="Administration",
+                contracted_enrollments=0,
+                paying_enrollments=0,
+                cancellations=0,
+                expected_revenue=Decimal("0.00"),
+                received_revenue=Decimal("0.00"),
+            )
+        )
+
+    with TestClient(create_app(base)) as client:
+        response = client.get(
+            "/api/enrollments",
+            params={
+                "campaign_id": campaign_id,
+                "date_start": DAY_1.isoformat(),
+                "date_stop": DAY_1.isoformat(),
+                "course": "Administration",
+                "limit": 1,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["items"][0]["course"] == "Administration"
+
+
+def test_campaign_and_enrollment_filters_paginate_in_sql(
+    migrated_database: tuple[Settings, Database],
+) -> None:
+    base, database = migrated_database
+    with database.session_factory.begin() as session:
+        for index in range(101):
+            session.add(
+                Campaign(
+                    meta_campaign_id=f"page-{index}",
+                    name=f"Page {index}",
+                    brand=CampaignBrand.RCTEC,
+                    effective_status="ACTIVE",
+                )
+            )
+        session.add(
+            Campaign(
+                meta_campaign_id="paused",
+                name="Paused",
+                brand=CampaignBrand.RCTEC,
+                effective_status="PAUSED",
+            )
+        )
+
+    with TestClient(create_app(base)) as client:
+        active = client.get(
+            "/api/campaigns",
+            params={"effective_status": "ACTIVE", "offset": 100, "limit": 1},
+        )
+        paused = client.get(
+            "/api/enrollments",
+            params={"effective_status": "PAUSED", "limit": 50},
+        )
+
+    assert active.status_code == 200
+    assert active.json()["total"] == 101
+    assert [item["meta_campaign_id"] for item in active.json()["items"]] == ["page-100"]
+    assert paused.status_code == 200
+    assert paused.json()["total"] == 0
+
+
 def test_enrollment_body_validation_is_fixed_and_does_not_echo_input(
     migrated_database: tuple[Settings, Database],
 ) -> None:
@@ -576,6 +677,101 @@ def test_enrollment_body_integers_are_strict(
 
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "validation_error"
+
+
+def test_commercial_closure_is_idempotent_and_validated(
+    migrated_database: tuple[Settings, Database],
+) -> None:
+    base, database = migrated_database
+    campaign_id = add_campaign(database, "closure")
+
+    with TestClient(create_app(base)) as client:
+        first = client.put(
+            f"/api/commercial-closures/{campaign_id}/{DAY_1.isoformat()}",
+            json={"status": "COMPLETE"},
+        )
+        repeated = client.put(
+            f"/api/commercial-closures/{campaign_id}/{DAY_1.isoformat()}",
+            json={"status": "COMPLETE"},
+        )
+        changed = client.put(
+            f"/api/commercial-closures/{campaign_id}/{DAY_1.isoformat()}",
+            json={"status": "PARTIAL"},
+        )
+        invalid = client.put(
+            f"/api/commercial-closures/{campaign_id}/{DAY_1.isoformat()}",
+            json={"status": "UNKNOWN"},
+        )
+        extra = client.put(
+            f"/api/commercial-closures/{campaign_id}/{DAY_1.isoformat()}",
+            json={"status": "COMPLETE", "extra": "rejected"},
+        )
+        missing = client.put(
+            f"/api/commercial-closures/99999/{DAY_1.isoformat()}",
+            json={"status": "COMPLETE"},
+        )
+
+    assert first.status_code == repeated.status_code == changed.status_code == 200
+    assert first.json()["status"] == "COMPLETE"
+    assert first.json()["meta_campaign_id"] == "closure"
+    assert changed.json()["status"] == "PARTIAL"
+    assert invalid.status_code == extra.status_code == 422
+    assert missing.status_code == 404
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(CommercialClosure)) == 1
+
+
+def test_late_commercial_event_and_coverage_share_summary_and_export_scope(
+    migrated_database: tuple[Settings, Database],
+) -> None:
+    base, database = migrated_database
+    campaign_id = add_campaign(
+        database,
+        "ended",
+        course="Administration",
+        start_time=datetime(2026, 8, 1, tzinfo=UTC),
+    )
+    with database.session_factory.begin() as session:
+        campaign = session.get(Campaign, campaign_id)
+        assert campaign is not None
+        campaign.stop_time = datetime(2026, 8, 31, tzinfo=UTC)
+        session.add(
+            EnrollmentRecord(
+                campaign_id=campaign_id,
+                reference_date=DAY_1,
+                course="Administration",
+                contracted_enrollments=1,
+                paying_enrollments=1,
+                cancellations=0,
+                expected_revenue=Decimal("50.00"),
+                received_revenue=Decimal("40.00"),
+            )
+        )
+
+    params = {"date_start": DAY_1.isoformat(), "date_stop": DAY_1.isoformat()}
+    with TestClient(create_app(base)) as client:
+        summary = client.get("/api/dashboard/summary", params=params)
+        export = client.get(
+            "/api/export",
+            params={**params, "format": "xlsx", "dataset": "enrollments"},
+        )
+    assert summary.status_code == 200
+    assert summary.json()["totals"]["received_revenue"] == "40.00"
+    assert summary.json()["commercial_coverage"] == {
+        "status": "unknown",
+        "expected_units": 1,
+        "unknown_units": 1,
+        "partial_units": 0,
+        "complete_units": 0,
+    }
+    workbook = load_workbook(BytesIO(export.content), data_only=True)
+    rows = list(workbook["Resumo"].values)
+    headers = list(rows[0])
+    status_column = headers.index("status")
+    assert any(
+        row[0] == "commercial_coverage" and row[status_column] == "unknown"
+        for row in rows[1:]
+    )
 
 
 def test_enrollment_money_becomes_finite_nonnegative_decimal() -> None:
@@ -838,9 +1034,113 @@ def test_frontend_propagates_the_active_scope_to_each_supported_listing() -> Non
         "effective_status": "ACTIVE",
     }
     assert frontend_app._enrollment_params(filters) == {
-        "limit": 100,
+        "limit": 50,
         "date_start": DAY_1.isoformat(),
         "date_stop": DAY_2.isoformat(),
         "brand": "RCTEC",
         "campaign_id": "7",
+        "effective_status": "ACTIVE",
     }
+
+
+def test_frontend_duplicate_and_zero_checks_use_server_filtered_totals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = Path(__file__).resolve().parents[1] / "frontend" / "app.py"
+    spec = spec_from_file_location("frontend_app", path)
+    assert spec is not None and spec.loader is not None
+    frontend_app = module_from_spec(spec)
+    spec.loader.exec_module(frontend_app)
+
+    client = Mock(spec=httpx.Client)
+    duplicate_request = Mock(
+        return_value={"items": [{"id": 101, "course": "Administration"}]}
+    )
+    monkeypatch.setattr(frontend_app, "_request", duplicate_request)
+
+    duplicate = frontend_app._find_duplicate(client, 7, DAY_1, "Administration")
+
+    assert duplicate == {"id": 101, "course": "Administration"}
+    duplicate_request.assert_called_once_with(
+        client,
+        "GET",
+        "/api/enrollments",
+        params={
+            "campaign_id": 7,
+            "date_start": DAY_1.isoformat(),
+            "date_stop": DAY_1.isoformat(),
+            "course": "Administration",
+            "limit": 1,
+        },
+    )
+
+    zero_lookup = Mock(
+        side_effect=[
+            ({"total": 0, "items": []}, None),
+            ({"total": 1, "items": [{"id": 101}]}, None),
+        ]
+    )
+    monkeypatch.setattr(frontend_app, "_request_result", zero_lookup)
+
+    assert frontend_app._has_daily_launches(client, 7, DAY_1) == (False, None)
+    assert frontend_app._has_daily_launches(client, 7, DAY_1) == (True, None)
+    assert zero_lookup.call_args_list[0].kwargs["params"] == {
+        "campaign_id": 7,
+        "date_start": DAY_1.isoformat(),
+        "date_stop": DAY_1.isoformat(),
+        "limit": 1,
+    }
+
+    visible_records = [{"id": index, "campaign_id": 7} for index in range(1, 51)]
+    duplicate_outside_page = {"id": 101, "campaign_id": 7, "course": "Administration"}
+    assert frontend_app._editable_records(
+        visible_records, 7, duplicate_outside_page
+    )[-1] == duplicate_outside_page
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0", "0"),
+        ("1234", "1234"),
+        ("1.234,56", "1234.56"),
+        ("1234,5", "1234.5"),
+        ("1234.56", "1234.56"),
+    ],
+)
+def test_frontend_money_parser_accepts_only_explicit_brl_or_simple_decimal(
+    value: str, expected: str
+) -> None:
+    path = Path(__file__).resolve().parents[1] / "frontend" / "app.py"
+    spec = spec_from_file_location("frontend_app", path)
+    assert spec is not None and spec.loader is not None
+    frontend_app = module_from_spec(spec)
+    spec.loader.exec_module(frontend_app)
+
+    assert frontend_app._parse_brl_money(value) == expected
+    for invalid in ("", "-1", "+1", "1,234", "1.234,567", "NaN", "12.34.56"):
+        with pytest.raises(ValueError):
+            frontend_app._parse_brl_money(invalid)
+
+    assert frontend_app._error_message("409").startswith("Já existe")
+    assert frontend_app._error_message("timeout").startswith("A operação")
+    first = {"name": "Campaign", "brand": "RCTEC", "effective_status": "ACTIVE", "meta_campaign_id": "meta-1"}
+    assert frontend_app._campaign_label(first, set()) == "Campaign — RCTEC — ACTIVE"
+    assert frontend_app._campaign_label(first, {"Campaign"}).endswith("meta-1")
+    rendered = frontend_app._display_rows(
+        [{"id": 1, "campaign_id": 2, "meta_campaign_id": "meta", "reference_date": "2026-09-01"}]
+    )
+    assert rendered == [{"reference_date": "01/09/2026"}]
+    assert frontend_app._launch_result_row(
+        {
+            "reference_date": "2026-09-01",
+            "course": "Administration",
+            "contracted_enrollments": 1,
+            "paying_enrollments": 1,
+            "cancellations": 0,
+            "expected_revenue": "10.00",
+            "received_revenue": "10.00",
+            "contribution_margin": None,
+            "notes": None,
+        }
+    )["Receita recebida"] == "R$ 10,00"

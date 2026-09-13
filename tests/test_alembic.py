@@ -43,14 +43,27 @@ def test_alembic_domain_schema_is_persisted_and_reversible(tmp_path: Path) -> No
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-    assert revision == ("0003_qualified_leads",)
+    assert revision == ("0004_commercial_closures",)
     assert "qualified_leads" in columns
     assert {
         "campaigns",
         "campaign_insights",
         "enrollment_records",
+        "commercial_closures",
         "sync_runs",
     } <= tables
+
+    run_alembic(project_root, database, "downgrade", "0003_qualified_leads")
+    with sqlite3.connect(database) as connection:
+        revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert revision == ("0003_qualified_leads",)
+    assert "commercial_closures" not in tables
 
     run_alembic(project_root, database, "downgrade", "0002_domain_models")
     with sqlite3.connect(database) as connection:

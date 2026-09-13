@@ -10,6 +10,8 @@ from meta_kpi_calc.db.models import (
     Campaign,
     CampaignBrand,
     CampaignInsight,
+    CommercialClosure,
+    CommercialClosureStatus,
     EnrollmentRecord,
 )
 from meta_kpi_calc.db.session import Database
@@ -571,6 +573,86 @@ def test_empty_database_returns_typed_zeros_and_none(
         if name != "net_enrollments"
     )
     assert summary.warnings == ()
+
+
+def test_commercial_coverage_tracks_event_days_and_expands_multi_day_insights(
+    migrated_database: tuple[Settings, Database],
+) -> None:
+    _, database = migrated_database
+    with database.session_factory.begin() as session:
+        campaign = add_campaign(session, "coverage")
+        session.add(
+            CampaignInsight(
+                campaign_id=campaign.id,
+                date_start=DAY_1,
+                date_stop=DAY_2,
+                spend=Decimal("20.00"),
+                synced_at=datetime.now(timezone.utc),
+            )
+        )
+        session.add_all(
+            [
+                CommercialClosure(
+                    campaign_id=campaign.id,
+                    reference_date=DAY_1,
+                    status=CommercialClosureStatus.COMPLETE,
+                ),
+                CommercialClosure(
+                    campaign_id=campaign.id,
+                    reference_date=DAY_2,
+                    status=CommercialClosureStatus.PARTIAL,
+                ),
+                CommercialClosure(
+                    campaign_id=campaign.id,
+                    reference_date=date(2026, 9, 3),
+                    status=CommercialClosureStatus.COMPLETE,
+                ),
+            ]
+        )
+
+    with database.session_factory() as session:
+        summary = summarize_kpis(session, DAY_1, date(2026, 9, 3))
+
+    assert summary.commercial_coverage.status == "partial"
+    assert summary.commercial_coverage.expected_units == 3
+    assert summary.commercial_coverage.unknown_units == 0
+    assert summary.commercial_coverage.partial_units == 1
+    assert summary.commercial_coverage.complete_units == 2
+
+
+def test_commercial_coverage_distinguishes_unknown_from_confirmed_zero(
+    migrated_database: tuple[Settings, Database],
+) -> None:
+    _, database = migrated_database
+    with database.session_factory.begin() as session:
+        campaign = add_campaign(session, "coverage-zero")
+        add_insight(
+            session,
+            campaign,
+            DAY_1,
+            spend="10.00",
+            impressions=100,
+            link_clicks=5,
+            leads=2,
+        )
+        session.add(
+            CommercialClosure(
+                campaign_id=campaign.id,
+                reference_date=DAY_2,
+                status=CommercialClosureStatus.COMPLETE,
+            )
+        )
+
+    with database.session_factory() as session:
+        incomplete = summarize_kpis(session, DAY_1, DAY_2)
+        empty = summarize_kpis(session, date(2026, 9, 3), date(2026, 9, 3))
+
+    assert incomplete.commercial_coverage.status == "unknown"
+    assert incomplete.commercial_coverage.expected_units == 2
+    assert incomplete.commercial_coverage.unknown_units == 1
+    assert incomplete.commercial_coverage.complete_units == 1
+    assert empty.commercial_coverage.status == "unknown"
+    assert empty.commercial_coverage.expected_units == 0
 
 
 def test_incomplete_qualified_leads_are_not_partially_aggregated(

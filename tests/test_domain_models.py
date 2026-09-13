@@ -11,6 +11,8 @@ from meta_kpi_calc.db.models import (
     Campaign,
     CampaignBrand,
     CampaignInsight,
+    CommercialClosure,
+    CommercialClosureStatus,
     EnrollmentRecord,
     SyncRun,
 )
@@ -126,6 +128,13 @@ def test_natural_keys_are_unique(
         }
         session.add(CampaignInsight(**insight_values))
         session.add(EnrollmentRecord(**enrollment_values))
+        session.add(
+            CommercialClosure(
+                campaign_id=campaign.id,
+                reference_date=date(2026, 9, 1),
+                status=CommercialClosureStatus.COMPLETE,
+            )
+        )
 
     with pytest.raises(IntegrityError):
         with database.session_factory.begin() as session:
@@ -134,6 +143,16 @@ def test_natural_keys_are_unique(
     with pytest.raises(IntegrityError):
         with database.session_factory.begin() as session:
             session.add(EnrollmentRecord(**enrollment_values))
+
+    with pytest.raises(IntegrityError):
+        with database.session_factory.begin() as session:
+            session.add(
+                CommercialClosure(
+                    campaign_id=campaign.id,
+                    reference_date=date(2026, 9, 1),
+                    status=CommercialClosureStatus.PARTIAL,
+                )
+            )
 
 
 def test_foreign_key_restricts_campaign_delete(
