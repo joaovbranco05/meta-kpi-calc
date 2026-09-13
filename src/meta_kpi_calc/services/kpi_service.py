@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import func, select
@@ -13,6 +13,8 @@ from meta_kpi_calc.db.models import (
     Campaign,
     CampaignBrand,
     CampaignInsight,
+    CommercialClosure,
+    CommercialClosureStatus,
     EnrollmentRecord,
 )
 from meta_kpi_calc.services.report_filters import ReportFilters
@@ -86,7 +88,17 @@ class KpiSummary:
     date_stop: date
     totals: KpiTotals
     kpis: CalculatedKpis
+    commercial_coverage: CommercialCoverage
     warnings: tuple[KpiWarning, ...]
+
+
+@dataclass(frozen=True)
+class CommercialCoverage:
+    status: str
+    expected_units: int
+    unknown_units: int
+    partial_units: int
+    complete_units: int
 
 
 def _ratio(
@@ -156,6 +168,88 @@ def calculate_kpis(totals: KpiTotals) -> CalculatedKpis:
     )
 
 
+def _commercial_coverage(
+    session: Session,
+    filters: ReportFilters,
+) -> CommercialCoverage:
+    """Measure known commercial closure for event-derived campaign days."""
+    campaign_filters = filters.campaign_predicates()
+    candidates: set[tuple[int, date]] = set()
+
+    insight_rows = session.execute(
+        select(
+            CampaignInsight.campaign_id,
+            CampaignInsight.date_start,
+            CampaignInsight.date_stop,
+        )
+        .join(Campaign, Campaign.id == CampaignInsight.campaign_id)
+        .where(
+            CampaignInsight.date_start >= filters.date_start,
+            CampaignInsight.date_stop <= filters.date_stop,
+            *campaign_filters,
+        )
+    ).all()
+    for campaign_id, insight_start, insight_stop in insight_rows:
+        current = insight_start
+        while current <= insight_stop:
+            candidates.add((campaign_id, current))
+            current += timedelta(days=1)
+
+    for campaign_id, reference_date in session.execute(
+        select(EnrollmentRecord.campaign_id, EnrollmentRecord.reference_date)
+        .join(Campaign, Campaign.id == EnrollmentRecord.campaign_id)
+        .where(
+            EnrollmentRecord.reference_date.between(filters.date_start, filters.date_stop),
+            *campaign_filters,
+        )
+    ):
+        candidates.add((campaign_id, reference_date))
+
+    closure_rows = session.execute(
+        select(
+            CommercialClosure.campaign_id,
+            CommercialClosure.reference_date,
+            CommercialClosure.status,
+        )
+        .join(Campaign, Campaign.id == CommercialClosure.campaign_id)
+        .where(
+            CommercialClosure.reference_date.between(filters.date_start, filters.date_stop),
+            *campaign_filters,
+        )
+    ).all()
+    closure_statuses = {
+        (campaign_id, reference_date): status
+        for campaign_id, reference_date, status in closure_rows
+    }
+    candidates.update(closure_statuses)
+
+    expected_units = len(candidates)
+    partial_units = sum(
+        status == CommercialClosureStatus.PARTIAL
+        for status in closure_statuses.values()
+    )
+    complete_units = sum(
+        status == CommercialClosureStatus.COMPLETE
+        for status in closure_statuses.values()
+    )
+    unknown_units = expected_units - partial_units - complete_units
+    if unknown_units:
+        status = "unknown"
+    elif partial_units:
+        status = "partial"
+    elif expected_units:
+        status = "complete"
+    else:
+        status = "unknown"
+    return CommercialCoverage(
+        status=status,
+        expected_units=expected_units,
+        unknown_units=unknown_units,
+        partial_units=partial_units,
+        complete_units=complete_units,
+    )
+
+
 def summarize_kpis(
     session: Session,
     date_start: date,
@@ -179,6 +273,7 @@ def summarize_kpis(
         effective_status=effective_status,
     )
     campaign_filters = filters.campaign_predicates()
+    commercial_coverage = _commercial_coverage(session, filters)
     insight_row = session.execute(
         select(
             func.count(CampaignInsight.id),
@@ -392,5 +487,6 @@ def summarize_kpis(
         date_stop=date_stop,
         totals=totals,
         kpis=calculate_kpis(totals),
+        commercial_coverage=commercial_coverage,
         warnings=tuple(warnings),
     )

@@ -40,6 +40,11 @@ class SyncStatus(str, PythonEnum):
     FAILED = "FAILED"
 
 
+class CommercialClosureStatus(str, PythonEnum):
+    PARTIAL = "PARTIAL"
+    COMPLETE = "COMPLETE"
+
+
 def _enum_values(enum_class: type[PythonEnum]) -> list[str]:
     return [member.value for member in enum_class]
 
@@ -101,6 +106,9 @@ class Campaign(Base):
 
     insights: Mapped[list[CampaignInsight]] = relationship(back_populates="campaign")
     enrollments: Mapped[list[EnrollmentRecord]] = relationship(
+        back_populates="campaign"
+    )
+    commercial_closures: Mapped[list[CommercialClosure]] = relationship(
         back_populates="campaign"
     )
 
@@ -261,6 +269,50 @@ class EnrollmentRecord(Base):
         if not normalized:
             raise ValueError("course must not be blank")
         return normalized
+
+
+class CommercialClosure(Base):
+    __tablename__ = "commercial_closures"
+    __table_args__ = (
+        UniqueConstraint(
+            "campaign_id",
+            "reference_date",
+            name="uq_commercial_closures_campaign_date",
+        ),
+        CheckConstraint(
+            "status IN ('PARTIAL', 'COMPLETE')",
+            name="ck_commercial_closures_status",
+        ),
+        Index("ix_commercial_closures_campaign_id", "campaign_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="RESTRICT"), nullable=False
+    )
+    reference_date: Mapped[date] = mapped_column(Date, nullable=False)
+    status: Mapped[CommercialClosureStatus] = mapped_column(
+        Enum(
+            CommercialClosureStatus,
+            name="commercial_closure_status",
+            native_enum=False,
+            create_constraint=False,
+            validate_strings=True,
+            values_callable=_enum_values,
+        ),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
+    )
+
+    campaign: Mapped[Campaign] = relationship(back_populates="commercial_closures")
 
 
 class SyncRun(Base):
