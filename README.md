@@ -4,12 +4,13 @@ Aplicação local para consolidar métricas de campanhas da Meta e calcular KPIs
 de investimento, leads e matrículas da RCTEC, FECAF Florianópolis e Curso com
 Bolsa.
 
-Esta entrega contém as etapas 0 a 9A: contrato do MVP, configuração,
+Esta entrega contém as etapas 0 a 9B: contrato do MVP, configuração,
 infraestrutura SQLite/Alembic, endpoint de saúde, modelos de domínio, dados
 fictícios, serviço interno de KPIs, cliente Meta mock-first e serviço interno de
 sincronização com agendamento opcional, além da API REST local para conexão,
 sincronização, campanhas, Insights, matrículas, dashboard, exportação e painel
-Streamlit, hardening operacional e lançamento diário seguro. Não há integração
+Streamlit, hardening operacional, lançamento diário seguro e leitura orientada
+à decisão. Não há integração
 com BotConversa nesta entrega.
 
 ## Requisitos
@@ -192,9 +193,9 @@ Para bancos existentes, aplique a migration antes de iniciar a aplicação:
 alembic upgrade head
 ```
 
-O lançamento diário, a cobertura e o painel foram validados localmente. A etapa
-9A ainda não libera piloto com cliente: a etapa 9B precisa tornar a leitura dos
-KPIs e a reconciliação operacional compreensíveis.
+O lançamento diário, a cobertura e o painel foram validados localmente. As
+etapas 9A e 9B compõem a base para o piloto assistido; antes da liberação, ainda
+é necessário reconciliar uma janela curta com a fonte comercial do cliente.
 
 ## Dashboard, exportação e painel
 
@@ -204,7 +205,15 @@ conjuntivos opcionais `brand`, `campaign_id`, `course` e `effective_status`.
 matrícula. O endpoint devolve totais, KPIs e avisos já calculados pelo serviço
 interno, inclusive métricas não calculáveis como `null`.
 
-`GET /api/export` exige os mesmos filtros, além de `format=csv|xlsx` e
+`GET /api/dashboard/campaign-comparison` usa esse mesmo recorte e devolve uma
+linha por campanha com investimento, leads, contratadas, pagantes, CAC
+financeiro, receita recebida e cobertura comercial. `last_media_sync_at` no
+resumo informa a última carga de mídia no recorte. `GET /api/dashboard/default-period`
+informa o menor e maior dia de Insight persistido, sem consultar a Meta.
+
+`GET /api/meta/sync/status` informa apenas o último estado local persistido da
+sincronização (`running`, `completed`, `failed` ou `not_confirmed`); também não
+consulta a Meta. `GET /api/export` exige os mesmos filtros, além de `format=csv|xlsx` e
 `dataset=performance|enrollments`. CSV contém apenas o dataset solicitado em
 UTF-8-SIG; XLSX produz sempre as abas `Resumo`, `Diário`, `Matrículas` e
 `Campanhas`. Textos iniciados por `=`, `+`, `-` ou `@` são neutralizados antes da
@@ -217,9 +226,14 @@ streamlit run frontend/app.py
 ```
 
 O painel usa exclusivamente `API_BASE_URL` (por padrão
-`http://127.0.0.1:8000`), mostra um banner em demonstração e trata API vazia ou
-indisponível sem exibir traceback. Não lê SQLite diretamente nem executa chamadas
-Meta por conta própria.
+`http://127.0.0.1:8000`), abre no período existente do demo quando há Insights
+e aplica filtros somente após **Aplicar filtros**. A visão geral organiza mídia,
+comercial e financeiro, explica cada KPI e mostra cobertura, pendências e
+inconsistências. A exportação XLSX usa o mesmo recorte exibido e invalida o
+arquivo preparado se os filtros mudarem. O painel mostra um banner em
+demonstração e trata API vazia ou indisponível sem exibir traceback. Ele só
+consulta a Meta quando o operador usa **Testar conexão Meta** ou
+**Sincronizar período filtrado**; não lê SQLite diretamente.
 
 As decisões congeladas, a matriz de aceite e o andamento ficam em `docs/`.
 O procedimento completo de instalação, migrations, backup, inicialização,
