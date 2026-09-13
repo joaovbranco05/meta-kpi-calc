@@ -1,0 +1,4 @@
+interface:
+  display_name: "Customer Pilot Readiness"
+  short_description: "Preparação segura do piloto do cliente"
+  default_prompt: "Use $customer-pilot-readiness para preparar e validar o piloto assistido do Meta KPI Calculator."

@@ -18,9 +18,11 @@ Antes de propor ou editar código:
 1. Ler `docs/STATUS.md` para identificar a próxima etapa liberada.
 2. Ler `docs/DECISIONS.md` para preservar os contratos arquiteturais.
 3. Ler a seção aplicável de `docs/ACCEPTANCE.md` e o `README.md`.
-4. Inspecionar a árvore, os testes e o estado do Git. Preservar arquivos do
+4. Para as etapas 9 ou posteriores, ler também `docs/PLAN-2.md` e
+   `docs/PRODUCT_REVIEW.md` antes de congelar o contrato.
+5. Inspecionar a árvore, os testes e o estado do Git. Preservar arquivos do
    usuário e alterações não relacionadas.
-5. Para regras de Meta, matrículas, atribuição, leads ou BotConversa, usar também
+6. Para regras de Meta, matrículas, atribuição, leads ou BotConversa, usar também
    a skill `botconversa-meta-automacao` quando ela estiver disponível.
 
 Os documentos do repositório são a fonte de verdade mutável. Não copiar para
@@ -123,6 +125,22 @@ concreto e onde deliberadamente escolheu uma solução direta.
 8. O QA confere que a documentação relata os resultados reais, e o pensador
    confirma que novas decisões não contradizem a arquitetura. Só então fechar a
    etapa para o usuário.
+
+## Evolução operacional a partir da etapa 9
+
+- A etapa 9A mantém `EnrollmentRecord` como resumo diário. Ela torna o
+  lançamento, a consulta, a paginação e a cobertura comercial seguros, sem
+  introduzir matrícula individual, pagamento, lead, coorte ou rateio.
+- A etapa 9B apresenta resultados compreensíveis e reconciliáveis, preservando
+  as fórmulas já aprovadas e deixando claro o que é desconhecido, parcial ou
+  completo.
+- A etapa 10 só pode introduzir matrícula individual, contrato e eventos
+  financeiros depois de confirmar a fonte comercial, a definição de pagante e
+  a transição dos dados agregados.
+- Nas etapas 9+, o QA precisa cobrir jornadas Streamlit relevantes, paginação
+  completa, estados de erro, cobertura comercial e reconciliação entre painel,
+  resumo, exportação e fonte comercial aplicável. Nenhum zero pode ser inferido
+  apenas porque não há registro.
 
 Não marcar uma etapa como concluída por intenção, código não executado ou teste
 apenas por código de saída quando o estado persistido também puder ser

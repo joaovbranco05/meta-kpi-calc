@@ -4,13 +4,13 @@ Aplicação local para consolidar métricas de campanhas da Meta e calcular KPIs
 de investimento, leads e matrículas da RCTEC, FECAF Florianópolis e Curso com
 Bolsa.
 
-Esta entrega contém as etapas 0 a 8: contrato do MVP, configuração,
+Esta entrega contém as etapas 0 a 9A: contrato do MVP, configuração,
 infraestrutura SQLite/Alembic, endpoint de saúde, modelos de domínio, dados
 fictícios, serviço interno de KPIs, cliente Meta mock-first e serviço interno de
 sincronização com agendamento opcional, além da API REST local para conexão,
 sincronização, campanhas, Insights, matrículas, dashboard, exportação e painel
-Streamlit e hardening operacional. Não há integração com BotConversa nesta
-entrega.
+Streamlit, hardening operacional e lançamento diário seguro. Não há integração
+com BotConversa nesta entrega.
 
 ## Requisitos
 
@@ -171,6 +171,30 @@ Em demo ou sem credenciais completas, o diagnóstico de conexão retorna 200 sem
 I/O externo. A verificação Meta ocorre somente por requisição explícita em modo
 real configurado. Todos os testes da API usaram mocks; nenhuma conexão real foi
 executada.
+
+## Lançamento diário e cobertura comercial
+
+Nesta etapa, um lançamento ainda é um resumo diário por campanha e curso; não é
+uma matrícula individual. No painel, use “Lançamento diário” para escolher a
+campanha pelo nome, marca e status, informar a data e salvar ou editar o
+fechamento. Se houver outro registro com a mesma campanha, data e curso, a tela
+abre o registro existente para edição.
+
+Depois de salvar, informe a situação comercial do dia: parcial ou fechada. Sem
+essa confirmação, a cobertura do resumo permanece “não informado”; ausência de
+registro nunca é interpretada como zero de matrículas ou receita. A cobertura
+considera os dias em que houve Insight, lançamento diário ou fechamento
+comercial no período.
+
+Para bancos existentes, aplique a migration antes de iniciar a aplicação:
+
+```bash
+alembic upgrade head
+```
+
+O lançamento diário, a cobertura e o painel foram validados localmente. A etapa
+9A ainda não libera piloto com cliente: a etapa 9B precisa tornar a leitura dos
+KPIs e a reconciliação operacional compreensíveis.
 
 ## Dashboard, exportação e painel
 
