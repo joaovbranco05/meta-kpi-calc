@@ -18,12 +18,14 @@ from meta_kpi_calc.api.schemas import (
     AccountResponse,
     CalculatedKpisResponse,
     CampaignResponse,
+    CampaignComparisonResponse,
     ClassificationPatch,
     CommercialClosureResponse,
     CommercialClosureWrite,
     CommercialCoverageResponse,
     ConnectionResponse,
     DashboardFiltersResponse,
+    DashboardDefaultPeriodResponse,
     DashboardSummaryResponse,
     EnrollmentResponse,
     EnrollmentWrite,
@@ -33,6 +35,7 @@ from meta_kpi_calc.api.schemas import (
     Page,
     SyncRequest,
     SyncResponse,
+    SyncStatusResponse,
 )
 from meta_kpi_calc.db.models import (
     Campaign,
@@ -40,6 +43,8 @@ from meta_kpi_calc.db.models import (
     CampaignInsight,
     CommercialClosure,
     EnrollmentRecord,
+    SyncRun,
+    SyncStatus,
 )
 from meta_kpi_calc.services.meta_client import MetaClientError
 from meta_kpi_calc.services.kpi_service import summarize_kpis
@@ -187,6 +192,15 @@ def _dashboard_summary(
         course=filters.course,
         effective_status=filters.effective_status,
     )
+    last_media_sync_at = session.scalar(
+        select(func.max(CampaignInsight.synced_at))
+        .join(Campaign, Campaign.id == CampaignInsight.campaign_id)
+        .where(
+            CampaignInsight.date_start >= filters.date_start,
+            CampaignInsight.date_stop <= filters.date_stop,
+            *filters.campaign_predicates(),
+        )
+    )
     return DashboardSummaryResponse(
         filters=DashboardFiltersResponse(**vars(filters)),
         totals=KpiTotalsResponse(**vars(summary.totals)),
@@ -195,7 +209,48 @@ def _dashboard_summary(
             **vars(summary.commercial_coverage)
         ),
         warnings=[KpiWarningResponse(**vars(warning)) for warning in summary.warnings],
+        last_media_sync_at=last_media_sync_at,
     )
+
+
+def _campaign_comparison(
+    session: Session, filters: ReportFilters
+) -> list[CampaignComparisonResponse]:
+    """Return the same KPI aggregation for each campaign in the current scope."""
+    campaigns = sorted(
+        report_campaigns(session, filters), key=lambda campaign: (campaign.name, campaign.id)
+    )
+    rows: list[CampaignComparisonResponse] = []
+    for campaign in campaigns:
+        summary = summarize_kpis(
+            session,
+            filters.date_start,
+            filters.date_stop,
+            campaign_id=campaign.id,
+            brand=filters.brand,
+            course=filters.course,
+            effective_status=filters.effective_status,
+        )
+        rows.append(
+            CampaignComparisonResponse(
+                id=campaign.id,
+                meta_campaign_id=campaign.meta_campaign_id,
+                name=campaign.name,
+                brand=campaign.brand,
+                course=campaign.course,
+                effective_status=campaign.effective_status,
+                spend=summary.totals.spend,
+                leads=summary.totals.leads,
+                contracted_enrollments=summary.totals.contracted_enrollments,
+                paying_enrollments=summary.totals.paying_enrollments,
+                financial_cac=summary.kpis.financial_cac,
+                received_revenue=summary.totals.received_revenue,
+                commercial_coverage=CommercialCoverageResponse(
+                    **vars(summary.commercial_coverage)
+                ),
+            )
+        )
+    return rows
 
 
 def _safe_export_value(value: object) -> object:
@@ -292,6 +347,42 @@ def sync_meta(payload: SyncRequest, request: Request) -> SyncResponse:
         detail = {"sync_run_id": exc.sync_run_id} if exc.sync_run_id is not None else {}
         _error(502, "meta_sync_failed", "Meta synchronization failed.", **detail)
     return SyncResponse(**vars(result))
+
+
+@router.get("/meta/sync/status", response_model=SyncStatusResponse)
+def sync_status(session: SessionDependency) -> SyncStatusResponse:
+    """Read the latest persisted synchronization state without calling Meta."""
+    run = session.scalar(
+        select(SyncRun).order_by(SyncRun.started_at.desc(), SyncRun.id.desc())
+    )
+    if run is None:
+        return SyncStatusResponse(
+            state="not_confirmed",
+            started_at=None,
+            finished_at=None,
+            date_start=None,
+            date_stop=None,
+        )
+    state = {
+        SyncStatus.RUNNING: "running",
+        SyncStatus.SUCCESS: "completed",
+        SyncStatus.FAILED: "failed",
+    }[run.status]
+    return SyncStatusResponse(
+        state=state,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+        date_start=run.date_start,
+        date_stop=run.date_stop,
+    )
+
+
+@router.get("/dashboard/default-period", response_model=DashboardDefaultPeriodResponse)
+def dashboard_default_period(session: SessionDependency) -> DashboardDefaultPeriodResponse:
+    date_start, date_stop = session.execute(
+        select(func.min(CampaignInsight.date_start), func.max(CampaignInsight.date_stop))
+    ).one()
+    return DashboardDefaultPeriodResponse(date_start=date_start, date_stop=date_stop)
 
 
 @router.get("/campaigns", response_model=Page[CampaignResponse])
@@ -615,6 +706,30 @@ def dashboard_summary(
     return _dashboard_summary(session, filters)
 
 
+@router.get(
+    "/dashboard/campaign-comparison",
+    response_model=list[CampaignComparisonResponse],
+)
+def dashboard_campaign_comparison(
+    session: SessionDependency,
+    date_start: date,
+    date_stop: date,
+    brand: CampaignBrand | None = None,
+    campaign_id: int | None = None,
+    course: str | None = None,
+    effective_status: str | None = None,
+) -> list[CampaignComparisonResponse]:
+    filters = _report_filters(
+        date_start,
+        date_stop,
+        brand,
+        campaign_id,
+        course,
+        effective_status,
+    )
+    return _campaign_comparison(session, filters)
+
+
 @router.get("/export")
 def export_report(
     session: SessionDependency,
@@ -635,7 +750,7 @@ def export_report(
         course,
         effective_status,
     )
-    insights, enrollments, campaigns = _export_rows(session, filters)
+    insights, enrollments, _campaigns = _export_rows(session, filters)
     if format == "csv":
         rows = insights if dataset == "performance" else enrollments
         output = StringIO(newline="")
@@ -661,6 +776,21 @@ def export_report(
         )
 
     summary = _dashboard_summary(session, filters).model_dump()
+    comparison_rows = []
+    for item in _campaign_comparison(session, filters):
+        row = item.model_dump()
+        coverage = row.pop("commercial_coverage")
+        assert isinstance(coverage, dict)
+        comparison_rows.append(
+            {
+                **row,
+                "commercial_coverage_status": coverage["status"],
+                "commercial_coverage_expected_units": coverage["expected_units"],
+                "commercial_coverage_unknown_units": coverage["unknown_units"],
+                "commercial_coverage_partial_units": coverage["partial_units"],
+                "commercial_coverage_complete_units": coverage["complete_units"],
+            }
+        )
     workbook = Workbook()
     workbook.remove(workbook.active)
     summary_rows = [
@@ -673,7 +803,7 @@ def export_report(
     _write_sheet(workbook, "Resumo", summary_rows)
     _write_sheet(workbook, "Diário", insights)
     _write_sheet(workbook, "Matrículas", enrollments)
-    _write_sheet(workbook, "Campanhas", campaigns)
+    _write_sheet(workbook, "Campanhas", comparison_rows)
     output = BytesIO()
     workbook.save(output)
     return Response(

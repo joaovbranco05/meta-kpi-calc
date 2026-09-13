@@ -49,6 +49,21 @@ class SyncResponse(ApiModel):
     is_partial: bool
 
 
+class SyncStatusResponse(ApiModel):
+    """Latest locally persisted synchronization state; never calls Meta."""
+
+    state: Literal["running", "completed", "failed", "not_confirmed"]
+    started_at: datetime | None
+    finished_at: datetime | None
+    date_start: date | None
+    date_stop: date | None
+
+
+class DashboardDefaultPeriodResponse(ApiModel):
+    date_start: date | None
+    date_stop: date | None
+
+
 class CampaignResponse(ApiModel):
     id: int
     meta_campaign_id: str
@@ -235,12 +250,29 @@ class CommercialCoverageResponse(ApiModel):
     complete_units: int
 
 
+class CampaignComparisonResponse(ApiModel):
+    id: int
+    meta_campaign_id: str
+    name: str
+    brand: CampaignBrand
+    course: str | None
+    effective_status: str | None
+    spend: Decimal
+    leads: int
+    contracted_enrollments: int
+    paying_enrollments: int
+    financial_cac: Decimal | None
+    received_revenue: Decimal
+    commercial_coverage: CommercialCoverageResponse
+
+
 class DashboardSummaryResponse(ApiModel):
     filters: DashboardFiltersResponse
     totals: KpiTotalsResponse
     kpis: CalculatedKpisResponse
     commercial_coverage: CommercialCoverageResponse
     warnings: list[KpiWarningResponse]
+    last_media_sync_at: datetime | None
 
 
 Item = TypeVar("Item")
