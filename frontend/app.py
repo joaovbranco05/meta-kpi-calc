@@ -10,6 +10,44 @@ import httpx
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 EFFECTIVE_STATUS_OPTIONS = ("", "ACTIVE", "PAUSED", "ARCHIVED", "DELETED", "DISABLED")
+PERIOD_OPTIONS = ("Este mês", "Mês anterior", "Últimos 7 dias", "Personalizado")
+
+KPI_CATALOG = (
+    ("calculated_ctr", "CTR calculado", "Mídia", "percent", "Cliques no link ÷ impressões.", "Indica a proporção de impressões que gerou clique no link."),
+    ("calculated_cpc", "CPC calculado", "Mídia", "currency", "Investimento ÷ cliques no link.", "Mostra o custo médio de um clique no link."),
+    ("calculated_cpm", "CPM calculado", "Mídia", "currency", "Investimento ÷ impressões × 1.000.", "Mostra o custo para mil impressões."),
+    ("cpl", "CPL", "Mídia", "currency", "Investimento ÷ leads.", "Mostra o custo médio de um lead."),
+    ("qualification_rate", "Qualificação dos leads", "Comercial", "percent", "Leads qualificados ÷ leads.", "Usa leads qualificados registrados; não é uma coorte."),
+    ("cpql", "CPQL", "Comercial", "currency", "Investimento ÷ leads qualificados.", "Mostra o custo por lead qualificado registrado."),
+    ("contractual_conversion", "Conversão contratada", "Comercial", "percent", "Contratadas ÷ leads.", "É uma razão entre totais do período, não uma coorte."),
+    ("financial_conversion", "Conversão pagante", "Comercial", "percent", "Pagantes ÷ leads.", "É uma razão entre totais do período, não uma coorte."),
+    ("net_enrollments", "Matrículas líquidas", "Comercial", "integer", "Contratadas − cancelamentos.", "Mostra o saldo registrado no período."),
+    ("contract_to_paying_conversion", "Contratadas para pagantes", "Comercial", "percent", "Pagantes ÷ contratadas.", "É uma razão entre totais do período, não uma coorte."),
+    ("cancellation_rate", "Taxa de cancelamento", "Comercial", "percent", "Cancelamentos ÷ contratadas.", "Pode exceder 100% quando os eventos pertencem a contratos de outros períodos."),
+    ("net_cac", "CAC líquido", "Financeiro", "currency", "Investimento ÷ (contratadas − cancelamentos).", "Fica indisponível sem matrículas líquidas positivas."),
+    ("contractual_cac", "CAC contratual", "Financeiro", "currency", "Investimento ÷ contratadas.", "Mostra o custo de mídia por matrícula contratada registrada."),
+    ("financial_cac", "CAC financeiro", "Financeiro", "currency", "Investimento ÷ pagantes.", "Mostra o custo de mídia por matrícula pagante registrada."),
+    ("expected_roas", "ROAS esperado", "Financeiro", "multiple", "Receita esperada ÷ investimento.", "Compara receita esperada com investimento em mídia."),
+    ("received_roas", "ROAS recebido", "Financeiro", "multiple", "Receita recebida ÷ investimento.", "Compara receita recebida com investimento em mídia."),
+    ("received_advertising_roi", "ROI de mídia recebido", "Financeiro", "percent", "(Receita recebida − investimento) ÷ investimento.", "Considera apenas investimento em mídia; não representa lucro total."),
+    ("expected_revenue_per_paying_enrollment", "Receita esperada por pagante", "Financeiro", "currency", "Receita esperada ÷ pagantes.", "Mostra a receita esperada média por pagante registrado."),
+    ("received_revenue_per_paying_enrollment", "Receita recebida por pagante", "Financeiro", "currency", "Receita recebida ÷ pagantes.", "Mostra a receita recebida média por pagante registrado."),
+)
+
+WARNING_MESSAGES = {
+    "NON_ADDITIVE_METRICS_OMITTED": "Alcance, frequência e CTR/CPC/CPM informados pela Meta não são somados neste recorte.",
+    "QUALIFIED_LEADS_INCOMPLETE": "Há dias sem medição de leads qualificados; taxa de qualificação e CPQL podem ficar indisponíveis.",
+    "COURSE_MISMATCH": "O curso do lançamento difere da classificação da campanha.",
+    "QUALIFIED_LEADS_EXCEED_LEADS": "Leads qualificados superam os leads no registro.",
+    "CANCELLATIONS_EXCEED_CONTRACTED": "Cancelamentos superam as contratadas no lançamento.",
+    "PAYING_EXCEEDS_CONTRACTED": "Pagantes superam as contratadas no lançamento.",
+}
+
+COMMERCIAL_COVERAGE_LABELS = {
+    "unknown": "Não informada",
+    "partial": "Parcial",
+    "complete": "Fechada",
+}
 
 
 def _format_value(value: Any) -> str:
@@ -18,6 +56,25 @@ def _format_value(value: Any) -> str:
     if isinstance(value, Decimal):
         return f"R$ {value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     return str(value)
+
+
+def _format_metric(value: Any, unit: str) -> str:
+    if value is None:
+        return "Não calculável neste recorte"
+    if unit == "currency":
+        return _format_currency(value)
+    if unit == "percent":
+        return f"{Decimal(str(value)):,.2f}%".replace(",", "X").replace(".", ",").replace("X", ".")
+    if unit == "multiple":
+        return f"{Decimal(str(value)):,.2f}x".replace(",", "X").replace(".", ",").replace("X", ".")
+    return str(value)
+
+
+def _format_date(value: str | None) -> str:
+    if value is None:
+        return "não confirmada"
+    parsed = date.fromisoformat(value[:10])
+    return parsed.strftime("%d/%m/%Y")
 
 
 def _format_currency(value: Any) -> str:
@@ -112,23 +169,78 @@ def _parse_brl_money(value: str) -> str:
     raise ValueError("Use 1.234,56, 1234,56, 1234.56 ou 0, com no máximo duas casas.")
 
 
-def _filters(st: Any) -> dict[str, str]:
+def _period_dates(period: str, today: date) -> tuple[date, date]:
+    if period == "Este mês":
+        return today.replace(day=1), today
+    if period == "Mês anterior":
+        current_month = today.replace(day=1)
+        previous_stop = current_month - timedelta(days=1)
+        return previous_stop.replace(day=1), previous_stop
+    return today - timedelta(days=6), today
+
+
+def _filters(st: Any, default_period: dict[str, Any] | None = None) -> dict[str, str]:
     today = date.today()
+    if "applied_filters" not in st.session_state:
+        default_start = default_period.get("date_start") if default_period else None
+        default_stop = default_period.get("date_stop") if default_period else None
+        if default_start and default_stop:
+            st.session_state["applied_filters"] = {
+                "date_start": default_start,
+                "date_stop": default_stop,
+            }
+            default_selection = "Personalizado"
+        else:
+            start, stop = _period_dates("Últimos 7 dias", today)
+            st.session_state["applied_filters"] = {
+                "date_start": start.isoformat(),
+                "date_stop": stop.isoformat(),
+            }
+            default_selection = "Últimos 7 dias"
+        st.session_state.setdefault("period_selection", default_selection)
+    applied = st.session_state["applied_filters"]
+    brand_options = ["", "RCTEC", "FECAF", "CURSO_COM_BOLSA", "NAO_CLASSIFICADA"]
     with st.sidebar:
         st.header("Filtros")
-        start = st.date_input("Início", today - timedelta(days=6))
-        stop = st.date_input("Fim", today)
-        brand = st.selectbox("Marca", ["", "RCTEC", "FECAF", "CURSO_COM_BOLSA", "NAO_CLASSIFICADA"])
-        effective_status = st.selectbox(
-            "Status efetivo",
-            EFFECTIVE_STATUS_OPTIONS,
-            format_func=lambda value: "Todos" if value == "" else value,
-        )
-    result = {"date_start": start.isoformat(), "date_stop": stop.isoformat()}
-    for key, value in (("brand", brand), ("effective_status", effective_status)):
-        if value.strip():
-            result[key] = value.strip()
-    return result
+        with st.form("report-filters"):
+            period = st.radio(
+                "Período",
+                PERIOD_OPTIONS,
+                index=PERIOD_OPTIONS.index(st.session_state["period_selection"]),
+            )
+            start = st.date_input(
+                "Início",
+                date.fromisoformat(applied["date_start"]),
+                disabled=period != "Personalizado",
+            )
+            stop = st.date_input(
+                "Fim",
+                date.fromisoformat(applied["date_stop"]),
+                disabled=period != "Personalizado",
+            )
+            brand = st.selectbox(
+                "Marca",
+                brand_options,
+                index=brand_options.index(applied.get("brand", "")),
+            )
+            effective_status = st.selectbox(
+                "Status efetivo",
+                EFFECTIVE_STATUS_OPTIONS,
+                index=EFFECTIVE_STATUS_OPTIONS.index(applied.get("effective_status", "")),
+                format_func=lambda value: "Todos" if value == "" else value,
+            )
+            submitted = st.form_submit_button("Aplicar filtros")
+    if submitted:
+        if period != "Personalizado":
+            start, stop = _period_dates(period, today)
+        result = {"date_start": start.isoformat(), "date_stop": stop.isoformat()}
+        for key, value in (("brand", brand), ("effective_status", effective_status)):
+            if value.strip():
+                result[key] = value.strip()
+        st.session_state["applied_filters"] = result
+        st.session_state["period_selection"] = period
+        return result
+    return applied
 
 
 def _campaign_params(filters: dict[str, str]) -> dict[str, str | int]:
@@ -211,29 +323,105 @@ def _campaign_selector(
     return {**filters, "campaign_id": str(chosen["id"])}
 
 
-def _overview(st: Any, client: httpx.Client, filters: dict[str, str]) -> None:
+def _overview(
+    st: Any,
+    client: httpx.Client,
+    filters: dict[str, str],
+    selected_campaign: dict[str, Any] | None,
+) -> None:
+    st.markdown(
+        """
+        <style>
+        [data-testid="stMetricLabel"] p {
+            font-size: 0.75rem;
+        }
+        [data-testid="stMetricValue"],
+        [data-testid="stMetricValue"] > div {
+            font-size: 1.5rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     summary = _request(client, "GET", "/api/dashboard/summary", params=filters)
     if summary is None:
         st.error("A API está indisponível ou respondeu com erro.")
         return
-    st.subheader("Visão geral")
     totals = summary["totals"]
-    columns = st.columns(4)
-    for column, (label, key) in zip(columns, (("Investimento", "spend"), ("Leads", "leads"), ("Contratadas", "contracted_enrollments"), ("Pagantes", "paying_enrollments"))):
-        column.metric(label, _format_currency(totals[key]) if key == "spend" else _format_value(totals[key]))
-    st.subheader("KPIs")
-    st.dataframe([{"Indicador": key, "Valor": _format_value(value)} for key, value in summary["kpis"].items()], hide_index=True, use_container_width=True)
-    if summary["warnings"]:
-        st.warning("Há dados incompletos ou divergências para revisar.")
-        st.dataframe(summary["warnings"], hide_index=True, use_container_width=True)
+    campaign_name = selected_campaign["name"] if selected_campaign else "todas"
+    scope = [
+        f"Período: {_format_date(filters['date_start'])} a {_format_date(filters['date_stop'])}",
+        f"Marca: {filters.get('brand', 'todas')}",
+        f"Campanha: {campaign_name}",
+    ]
+    if filters.get("effective_status"):
+        scope.append(f"Status: {filters['effective_status']}")
+    if filters.get("course"):
+        scope.append(f"Curso: {filters['course']}")
+    st.caption(" · ".join(scope))
+    last_sync = summary.get("last_media_sync_at")
+    st.caption(f"Última atualização de mídia: {_format_date(last_sync)}")
+    st.subheader("Mídia")
+    media = st.columns(2)
+    media[0].metric("Investimento", _format_currency(totals["spend"]))
+    media[1].metric("Leads", _format_metric(totals["leads"], "integer"))
+    st.subheader("Comercial")
+    commercial = st.columns(3)
+    commercial[0].metric("Contratadas", _format_metric(totals["contracted_enrollments"], "integer"))
+    commercial[1].metric("Pagantes", _format_metric(totals["paying_enrollments"], "integer"))
+    commercial[2].metric("Qualificação dos leads", _format_metric(summary["kpis"]["qualification_rate"], "percent"))
+    st.subheader("Financeiro")
+    financial = st.columns(3)
+    financial[0].metric("CAC financeiro", _format_metric(summary["kpis"]["financial_cac"], "currency"))
+    financial[1].metric("Receita recebida", _format_currency(totals["received_revenue"]))
+    financial[2].metric("ROAS recebido", _format_metric(summary["kpis"]["received_roas"], "multiple"))
     coverage = summary["commercial_coverage"]
-    labels = {"unknown": "não informado", "partial": "parcial", "complete": "fechado"}
-    st.caption(
-        "Cobertura comercial: "
-        f"{labels[coverage['status']]} "
-        f"({coverage['complete_units']} fechados, {coverage['partial_units']} parciais, "
-        f"{coverage['unknown_units']} sem confirmação)."
+    _coverage_notice(st, coverage)
+    _warning_sections(st, summary["warnings"])
+    st.subheader("Catálogo de indicadores")
+    st.dataframe(
+        [
+            {
+                "Grupo": group,
+                "Indicador": label,
+                "Valor": _format_metric(summary["kpis"][key], unit),
+                "Fórmula": formula,
+                "Interpretação": interpretation,
+            }
+            for key, label, group, unit, formula, interpretation in KPI_CATALOG
+        ],
+        hide_index=True,
+        use_container_width=True,
     )
+
+
+def _coverage_notice(st: Any, coverage: dict[str, Any]) -> None:
+    status = coverage["status"]
+    if status == "complete":
+        st.info("Cobertura comercial fechada.")
+    elif status == "partial":
+        st.warning("Há dias com fechamento parcial; revise antes de decidir.")
+    elif coverage["expected_units"]:
+        st.warning("Há dias sem confirmação comercial; os totais comerciais podem estar incompletos.")
+    else:
+        st.warning("Não há dias com dado operacional no recorte; cobertura comercial não confirmada.")
+
+
+def _warning_sections(st: Any, warnings: list[dict[str, Any]]) -> None:
+    groups = {"Informações": [], "Pendências": [], "Inconsistências": []}
+    for warning in warnings:
+        code = warning["code"]
+        row = {"Mensagem": WARNING_MESSAGES.get(code, warning["message"])}
+        if code == "NON_ADDITIVE_METRICS_OMITTED":
+            groups["Informações"].append(row)
+        elif code == "QUALIFIED_LEADS_INCOMPLETE":
+            groups["Pendências"].append(row)
+        else:
+            groups["Inconsistências"].append(row)
+    for title, rows in groups.items():
+        if rows:
+            st.subheader(title)
+            st.dataframe(rows, hide_index=True, use_container_width=True)
 
 
 def _campaigns(
@@ -243,33 +431,37 @@ def _campaigns(
     selected_campaign: dict[str, Any] | None,
 ) -> None:
     st.subheader("Campanhas e comparação")
-    campaigns = _request(
-        client,
-        "GET",
-        "/api/campaigns",
-        params={
-            **_campaign_params(filters),
-            "offset": int(st.session_state.get("campaign-table-page", 0)) * 50,
-            "limit": 50,
-        },
+    comparison = _request(
+        client, "GET", "/api/dashboard/campaign-comparison", params=filters
     )
-    if campaigns is None:
-        st.error("Não foi possível carregar campanhas.")
+    if comparison is None:
+        st.error("Não foi possível carregar a comparação por campanha.")
         return
-    offset = _page_offset(st, "campaign-table-page", campaigns["total"])
-    if offset != campaigns["offset"]:
-        campaigns = _request(
-            client,
-            "GET",
-            "/api/campaigns",
-            params={**_campaign_params(filters), "offset": offset, "limit": 50},
-        )
-        if campaigns is None:
-            return
-    if not campaigns["items"]:
+    if not comparison:
         st.info("Nenhuma campanha encontrada.")
         return
-    st.dataframe(_display_rows(campaigns["items"]), hide_index=True, use_container_width=True)
+    st.dataframe(
+        [
+            {
+                "Campanha": row["name"],
+                "Marca": row["brand"],
+                "Curso": row["course"] or "—",
+                "Status": row["effective_status"] or "—",
+                "Investimento": _format_currency(row["spend"]),
+                "Leads": row["leads"],
+                "Contratadas": row["contracted_enrollments"],
+                "Pagantes": row["paying_enrollments"],
+                "CAC financeiro": _format_metric(row["financial_cac"], "currency"),
+                "Receita recebida": _format_currency(row["received_revenue"]),
+                "Cobertura comercial": COMMERCIAL_COVERAGE_LABELS[
+                    row["commercial_coverage"]["status"]
+                ],
+            }
+            for row in comparison
+        ],
+        hide_index=True,
+        use_container_width=True,
+    )
     if selected_campaign is None:
         st.info("Selecione uma campanha na barra lateral para alterar a classificação.")
         return
@@ -566,19 +758,77 @@ def _enrollments(
     st.rerun()
 
 
-def _sync(st: Any, client: httpx.Client, filters: dict[str, str]) -> None:
+def _sync(st: Any, client: httpx.Client, filters: dict[str, str], sync_state: dict[str, Any] | None) -> None:
     st.subheader("Sincronização e configurações")
-    connection = _request(client, "GET", "/api/meta/connection")
-    if connection is None:
-        st.error("Não foi possível consultar a conexão.")
-        return
-    st.json({key: connection[key] for key in ("mode", "configured", "connected")})
-    if st.button("Sincronizar período filtrado"):
-        result = _request(client, "POST", "/api/meta/sync", json={"date_start": filters["date_start"], "date_stop": filters["date_stop"]})
-        if result:
-            st.success("Sincronização concluída.")
+    if sync_state is None:
+        st.warning("Não foi possível consultar o estado local da sincronização.")
+    else:
+        labels = {
+            "running": "Em execução",
+            "completed": "Concluída",
+            "failed": "Falhou",
+            "not_confirmed": "Não confirmada",
+        }
+        st.info(f"Estado local: {labels[sync_state['state']]}")
+        if sync_state["date_start"]:
+            st.caption(
+                f"Último período: {_format_date(sync_state['date_start'])} a "
+                f"{_format_date(sync_state['date_stop'])}"
+            )
+    if st.button("Testar conexão Meta"):
+        connection, error = _request_result(client, "GET", "/api/meta/connection")
+        if connection is None:
+            st.error(_error_message(error))
+        elif connection["connected"]:
+            st.success("Conexão Meta confirmada.")
         else:
-            st.error("A sincronização não está disponível ou falhou.")
+            st.info("A conexão Meta não está configurada neste ambiente.")
+    if st.button("Sincronizar período filtrado"):
+        result, error = _request_result(
+            client,
+            "POST",
+            "/api/meta/sync",
+            json={"date_start": filters["date_start"], "date_stop": filters["date_stop"]},
+        )
+        if result is not None:
+            st.session_state["sync_notice"] = "Sincronização concluída."
+        else:
+            st.session_state["sync_notice"] = _error_message(error)
+        st.rerun()
+
+
+def _export(st: Any, client: httpx.Client, filters: dict[str, str]) -> None:
+    st.subheader("Exportar relatório")
+    if not _export_is_current(st, filters):
+        st.session_state.pop("report_export", None)
+        st.session_state.pop("report_export_filters", None)
+    if st.button("Preparar relatório XLSX"):
+        try:
+            response = client.get(
+                f"{API_BASE_URL}/api/export",
+                params={**filters, "format": "xlsx", "dataset": "performance"},
+                timeout=10,
+            )
+            response.raise_for_status()
+        except (httpx.HTTPError, ValueError):
+            st.error("Não foi possível preparar o relatório.")
+        else:
+            st.session_state["report_export"] = response.content
+            st.session_state["report_export_filters"] = dict(filters)
+    if report := st.session_state.get("report_export"):
+        st.download_button(
+            "Baixar relatório XLSX",
+            data=report,
+            file_name="meta-kpi-report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+
+def _export_is_current(st: Any, filters: dict[str, str]) -> bool:
+    return (
+        "report_export" not in st.session_state
+        or st.session_state.get("report_export_filters") == filters
+    )
 
 
 def main() -> None:
@@ -587,24 +837,30 @@ def main() -> None:
     st.set_page_config(page_title="Meta KPI Calculator", layout="wide")
     st.title("Meta KPI Calculator")
     with httpx.Client() as client:
-        filters = _campaign_selector(st, client, _filters(st))
+        health = _request(client, "GET", "/health")
+        if health and health.get("mode") == "demo":
+            st.info("Modo demonstração: os dados exibidos são fictícios.")
+        default_period = _request(client, "GET", "/api/dashboard/default-period")
+        filters = _campaign_selector(st, client, _filters(st, default_period))
         selected_campaign = None
         if "campaign_id" in filters:
             selected_campaign = _request(
                 client, "GET", f"/api/campaigns/{filters['campaign_id']}"
             )
-        connection = _request(client, "GET", "/api/meta/connection")
-        if connection and connection["mode"] == "demo":
-            st.info("Modo demonstração: os dados exibidos são fictícios.")
-        overview, campaigns, enrollments, sync = st.tabs(["Visão geral", "Campanhas", "Lançamentos diários", "Sincronização"])
+        sync_state = _request(client, "GET", "/api/meta/sync/status")
+        overview, campaigns, enrollments, sync, export = st.tabs(["Visão geral", "Campanhas", "Lançamentos diários", "Sincronização", "Exportar"])
         with overview:
-            _overview(st, client, filters)
+            _overview(st, client, filters, selected_campaign)
         with campaigns:
             _campaigns(st, client, filters, selected_campaign)
         with enrollments:
             _enrollments(st, client, filters, selected_campaign)
         with sync:
-            _sync(st, client, filters)
+            if notice := st.session_state.pop("sync_notice", None):
+                st.info(notice)
+            _sync(st, client, filters, sync_state)
+        with export:
+            _export(st, client, filters)
 
 
 if __name__ == "__main__":
