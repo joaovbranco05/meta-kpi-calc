@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
+import inspect
 from importlib.util import module_from_spec, spec_from_file_location
 from io import BytesIO
 from pathlib import Path
@@ -22,6 +23,7 @@ from meta_kpi_calc.db.models import (
     CampaignInsight,
     CommercialClosure,
     EnrollmentRecord,
+    SyncRun,
     SyncStatus,
 )
 from meta_kpi_calc.db.session import Database
@@ -928,13 +930,148 @@ def test_dashboard_and_exports_share_the_same_campaign_scope(
         workbook_response = client.get(
             "/api/export", params={**params, "format": "xlsx", "dataset": "performance"}
         )
+        comparison_response = client.get(
+            "/api/dashboard/campaign-comparison", params=params
+        )
     assert workbook_response.status_code == 200
+    assert comparison_response.status_code == 200
     workbook = load_workbook(BytesIO(workbook_response.content), data_only=False)
     assert workbook.sheetnames == ["Resumo", "Diário", "Matrículas", "Campanhas"]
     enrollment_sheet = workbook["Matrículas"]
     headers = [cell.value for cell in enrollment_sheet[1]]
     notes_column = headers.index("notes") + 1
     assert enrollment_sheet.cell(row=2, column=notes_column).value == "'=not-a-formula"
+    campaign_headers = [cell.value for cell in workbook["Campanhas"][1]]
+    assert "financial_cac" in campaign_headers
+    assert "commercial_coverage_status" in campaign_headers
+    campaign_row = {
+        header: workbook["Campanhas"].cell(row=2, column=index + 1).value
+        for index, header in enumerate(campaign_headers)
+    }
+    comparison = comparison_response.json()[0]
+    assert Decimal(str(campaign_row["financial_cac"])) == Decimal(comparison["financial_cac"])
+    assert Decimal(str(campaign_row["received_revenue"])) == Decimal(comparison["received_revenue"])
+
+
+def test_dashboard_comparison_summary_sync_status_and_default_period_are_local(
+    migrated_database: tuple[Settings, Database],
+) -> None:
+    settings, database = migrated_database
+    first = add_campaign(database, "first", brand=CampaignBrand.RCTEC)
+    second = add_campaign(database, "second", brand=CampaignBrand.RCTEC)
+    add_insight(database, first, DAY_1)
+    with database.session_factory.begin() as session:
+        session.add(
+            EnrollmentRecord(
+                campaign_id=first,
+                reference_date=DAY_1,
+                course="Administration",
+                contracted_enrollments=2,
+                paying_enrollments=1,
+                cancellations=0,
+                expected_revenue=Decimal("20.00"),
+                received_revenue=Decimal("10.00"),
+            )
+        )
+        session.add(
+            SyncRun(
+                started_at=datetime(2026, 9, 3, tzinfo=UTC),
+                finished_at=datetime(2026, 9, 3, 1, tzinfo=UTC),
+                status=SyncStatus.SUCCESS,
+                date_start=DAY_1,
+                date_stop=DAY_1,
+            )
+        )
+
+    params = {"date_start": DAY_1.isoformat(), "date_stop": DAY_1.isoformat(), "brand": "RCTEC"}
+    with TestClient(create_app(settings)) as client:
+        summary = client.get("/api/dashboard/summary", params=params)
+        comparison = client.get("/api/dashboard/campaign-comparison", params=params)
+        sync_status = client.get("/api/meta/sync/status")
+        default_period = client.get("/api/dashboard/default-period")
+        export = client.get(
+            "/api/export", params={**params, "format": "xlsx", "dataset": "performance"}
+        )
+
+    assert summary.status_code == 200
+    assert summary.json()["last_media_sync_at"] == "2026-09-02T12:00:00"
+    assert comparison.status_code == 200
+    rows = comparison.json()
+    assert [row["name"] for row in rows] == ["Campaign first", "Campaign second"]
+    assert rows[0]["financial_cac"] == "12.340000"
+    assert rows[1]["spend"] == "0.00"
+    assert rows[1]["financial_cac"] is None
+    assert rows[1]["commercial_coverage"] == {
+        "status": "unknown",
+        "expected_units": 0,
+        "unknown_units": 0,
+        "partial_units": 0,
+        "complete_units": 0,
+    }
+    assert sync_status.json() == {
+        "state": "completed",
+        "started_at": "2026-09-03T00:00:00",
+        "finished_at": "2026-09-03T01:00:00",
+        "date_start": DAY_1.isoformat(),
+        "date_stop": DAY_1.isoformat(),
+    }
+    assert default_period.json() == {
+        "date_start": DAY_1.isoformat(),
+        "date_stop": DAY_1.isoformat(),
+    }
+    workbook = load_workbook(BytesIO(export.content), data_only=False)
+    headers = [cell.value for cell in workbook["Campanhas"][1]]
+    assert "commercial_coverage_status" in headers
+
+
+def test_local_sync_status_and_default_period_are_unknown_without_rows(
+    migrated_database: tuple[Settings, Database],
+) -> None:
+    settings, _ = migrated_database
+    with TestClient(create_app(settings)) as client:
+        sync_status = client.get("/api/meta/sync/status")
+        default_period = client.get("/api/dashboard/default-period")
+
+    assert sync_status.json() == {
+        "state": "not_confirmed",
+        "started_at": None,
+        "finished_at": None,
+        "date_start": None,
+        "date_stop": None,
+    }
+    assert default_period.json() == {"date_start": None, "date_stop": None}
+
+
+@pytest.mark.parametrize(
+    ("persisted", "expected"),
+    [(SyncStatus.RUNNING, "running"), (SyncStatus.FAILED, "failed")],
+)
+def test_local_sync_status_exposes_running_and_failed_runs(
+    migrated_database: tuple[Settings, Database],
+    persisted: SyncStatus,
+    expected: str,
+) -> None:
+    settings, database = migrated_database
+    with database.session_factory.begin() as session:
+        session.add(
+            SyncRun(
+                started_at=datetime(2026, 9, 4, tzinfo=UTC),
+                finished_at=(
+                    None
+                    if persisted == SyncStatus.RUNNING
+                    else datetime(2026, 9, 4, 1, tzinfo=UTC)
+                ),
+                status=persisted,
+                date_start=DAY_1,
+                date_stop=DAY_2,
+            )
+        )
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/api/meta/sync/status")
+
+    assert response.status_code == 200
+    assert response.json()["state"] == expected
+    assert response.json()["date_start"] == DAY_1.isoformat()
 
 
 def test_dashboard_and_export_reject_invalid_or_blank_filter_values(
@@ -982,6 +1119,7 @@ def test_frontend_propagates_the_active_scope_to_each_supported_listing() -> Non
         def __init__(self, effective_status: str) -> None:
             self.sidebar = self
             self.effective_status = effective_status
+            self.session_state: dict[str, object] = {}
 
         def __enter__(self) -> "FakeStreamlit":
             return self
@@ -992,7 +1130,21 @@ def test_frontend_propagates_the_active_scope_to_each_supported_listing() -> Non
         def header(self, _label: str) -> None:
             return None
 
-        def date_input(self, label: str, _default: date | None = None) -> date:
+        def form(self, _key: str) -> "FakeStreamlit":
+            return self
+
+        def radio(
+            self, label: str, options: tuple[str, ...], **_kwargs: object
+        ) -> str:
+            assert label == "Período"
+            assert tuple(options) == frontend_app.PERIOD_OPTIONS
+            return "Personalizado"
+
+        def form_submit_button(self, label: str) -> bool:
+            assert label == "Aplicar filtros"
+            return True
+
+        def date_input(self, label: str, _default: date | None = None, **_kwargs: object) -> date:
             return DAY_1 if label == "Início" else DAY_2
 
         def selectbox(
@@ -1096,6 +1248,60 @@ def test_frontend_duplicate_and_zero_checks_use_server_filtered_totals(
     assert frontend_app._editable_records(
         visible_records, 7, duplicate_outside_page
     )[-1] == duplicate_outside_page
+
+
+def test_frontend_uses_local_health_default_period_and_current_export_scope() -> None:
+    path = Path(__file__).resolve().parents[1] / "frontend" / "app.py"
+    spec = spec_from_file_location("frontend_app", path)
+    assert spec is not None and spec.loader is not None
+    frontend_app = module_from_spec(spec)
+    spec.loader.exec_module(frontend_app)
+
+    source = inspect.getsource(frontend_app.main)
+    assert '"/health"' in source
+    assert '"/api/meta/connection"' not in source
+
+    class FakeStreamlit:
+        def __init__(self) -> None:
+            self.sidebar = self
+            self.session_state: dict[str, object] = {}
+
+        def __enter__(self) -> "FakeStreamlit":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def header(self, _label: str) -> None:
+            return None
+
+        def form(self, _key: str) -> "FakeStreamlit":
+            return self
+
+        def radio(self, _label: str, options: tuple[str, ...], **_kwargs: object) -> str:
+            return options[-1]
+
+        def date_input(self, _label: str, value: date, **_kwargs: object) -> date:
+            return value
+
+        def selectbox(self, _label: str, options: list[str] | tuple[str, ...], **_kwargs: object) -> str:
+            return options[0]
+
+        def form_submit_button(self, _label: str) -> bool:
+            return False
+
+    streamlit = FakeStreamlit()
+    filters = frontend_app._filters(
+        streamlit,
+        {"date_start": DAY_1.isoformat(), "date_stop": DAY_2.isoformat()},
+    )
+    assert filters == {"date_start": DAY_1.isoformat(), "date_stop": DAY_2.isoformat()}
+    streamlit.session_state["report_export"] = b"old report"
+    streamlit.session_state["report_export_filters"] = dict(filters)
+    assert frontend_app._export_is_current(streamlit, filters)
+    assert not frontend_app._export_is_current(
+        streamlit, {"date_start": DAY_1.isoformat(), "date_stop": DAY_1.isoformat()}
+    )
 
 
 @pytest.mark.parametrize(
