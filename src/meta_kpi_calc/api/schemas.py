@@ -2,11 +2,15 @@
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Generic, TypeVar
+from typing import Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from meta_kpi_calc.db.models import CampaignBrand, SyncStatus
+from meta_kpi_calc.db.models import (
+    CampaignBrand,
+    CommercialClosureStatus,
+    SyncStatus,
+)
 
 
 class ApiModel(BaseModel):
@@ -146,6 +150,18 @@ class EnrollmentResponse(EnrollmentWrite):
     updated_at: datetime
 
 
+class CommercialClosureWrite(ApiModel):
+    status: CommercialClosureStatus
+
+
+class CommercialClosureResponse(CommercialClosureWrite):
+    campaign_id: int
+    meta_campaign_id: str
+    reference_date: date
+    created_at: datetime
+    updated_at: datetime
+
+
 class DashboardFiltersResponse(ApiModel):
     date_start: date
     date_stop: date
@@ -211,10 +227,19 @@ class KpiWarningResponse(ApiModel):
     reference_date: date | None
 
 
+class CommercialCoverageResponse(ApiModel):
+    status: Literal["unknown", "partial", "complete"]
+    expected_units: int
+    unknown_units: int
+    partial_units: int
+    complete_units: int
+
+
 class DashboardSummaryResponse(ApiModel):
     filters: DashboardFiltersResponse
     totals: KpiTotalsResponse
     kpis: CalculatedKpisResponse
+    commercial_coverage: CommercialCoverageResponse
     warnings: list[KpiWarningResponse]
 
 

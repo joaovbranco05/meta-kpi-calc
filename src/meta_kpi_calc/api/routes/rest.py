@@ -19,6 +19,9 @@ from meta_kpi_calc.api.schemas import (
     CalculatedKpisResponse,
     CampaignResponse,
     ClassificationPatch,
+    CommercialClosureResponse,
+    CommercialClosureWrite,
+    CommercialCoverageResponse,
     ConnectionResponse,
     DashboardFiltersResponse,
     DashboardSummaryResponse,
@@ -35,6 +38,7 @@ from meta_kpi_calc.db.models import (
     Campaign,
     CampaignBrand,
     CampaignInsight,
+    CommercialClosure,
     EnrollmentRecord,
 )
 from meta_kpi_calc.services.meta_client import MetaClientError
@@ -124,6 +128,19 @@ def _enrollment_response(
     )
 
 
+def _commercial_closure_response(
+    closure: CommercialClosure, meta_campaign_id: str
+) -> CommercialClosureResponse:
+    return CommercialClosureResponse(
+        campaign_id=closure.campaign_id,
+        meta_campaign_id=meta_campaign_id,
+        reference_date=closure.reference_date,
+        status=closure.status,
+        created_at=closure.created_at,
+        updated_at=closure.updated_at,
+    )
+
+
 def _validate_period(date_start: date | None, date_stop: date | None) -> None:
     if (date_start is None) != (date_stop is None) or (
         date_start is not None and date_stop is not None and date_start > date_stop
@@ -174,6 +191,9 @@ def _dashboard_summary(
         filters=DashboardFiltersResponse(**vars(filters)),
         totals=KpiTotalsResponse(**vars(summary.totals)),
         kpis=CalculatedKpisResponse(**vars(summary.kpis)),
+        commercial_coverage=CommercialCoverageResponse(
+            **vars(summary.commercial_coverage)
+        ),
         warnings=[KpiWarningResponse(**vars(warning)) for warning in summary.warnings],
     )
 
@@ -288,6 +308,14 @@ def list_campaigns(
     limit: Limit = 50,
 ) -> Page[CampaignResponse]:
     _validate_period(date_start, date_stop)
+    if course is not None:
+        course = course.strip()
+        if not course:
+            _error(422, "validation_error", "Request validation failed.")
+    if effective_status is not None:
+        effective_status = effective_status.strip()
+        if not effective_status:
+            _error(422, "validation_error", "Request validation failed.")
     report_filters = ReportFilters(
         date_start=date_start,
         date_stop=date_stop,
@@ -385,7 +413,7 @@ def _enrollment_duplicate(
     payload: EnrollmentWrite,
     *,
     excluding_id: int | None = None,
-) -> bool:
+) -> int | None:
     query = select(EnrollmentRecord.id).where(
         EnrollmentRecord.campaign_id == payload.campaign_id,
         EnrollmentRecord.reference_date == payload.reference_date,
@@ -393,7 +421,7 @@ def _enrollment_duplicate(
     )
     if excluding_id is not None:
         query = query.where(EnrollmentRecord.id != excluding_id)
-    return session.scalar(query) is not None
+    return session.scalar(query)
 
 
 def _apply_enrollment(
@@ -414,11 +442,13 @@ def create_enrollment(
             campaign = session.get(Campaign, payload.campaign_id)
             if campaign is None:
                 _error(404, "campaign_not_found", "Campaign was not found.")
-            if _enrollment_duplicate(session, payload):
+            duplicate_id = _enrollment_duplicate(session, payload)
+            if duplicate_id is not None:
                 _error(
                     409,
                     "duplicate_enrollment",
                     "Enrollment already exists; use PUT to update it.",
+                    record_id=duplicate_id,
                 )
             enrollment = EnrollmentRecord(**payload.model_dump())
             session.add(enrollment)
@@ -439,12 +469,21 @@ def list_enrollments(
     campaign_id: int | None = None,
     brand: CampaignBrand | None = None,
     course: str | None = None,
+    effective_status: str | None = None,
     date_start: date | None = None,
     date_stop: date | None = None,
     offset: Offset = 0,
     limit: Limit = 50,
 ) -> Page[EnrollmentResponse]:
     _validate_period(date_start, date_stop)
+    if course is not None:
+        course = course.strip()
+        if not course:
+            _error(422, "validation_error", "Request validation failed.")
+    if effective_status is not None:
+        effective_status = effective_status.strip()
+        if not effective_status:
+            _error(422, "validation_error", "Request validation failed.")
     filters = []
     if campaign_id is not None:
         filters.append(EnrollmentRecord.campaign_id == campaign_id)
@@ -452,6 +491,8 @@ def list_enrollments(
         filters.append(Campaign.brand == brand)
     if course is not None:
         filters.append(EnrollmentRecord.course == course)
+    if effective_status is not None:
+        filters.append(Campaign.effective_status == effective_status)
     if date_start is not None and date_stop is not None:
         filters.append(EnrollmentRecord.reference_date.between(date_start, date_stop))
     base = select(EnrollmentRecord, Campaign.meta_campaign_id).join(
@@ -473,6 +514,54 @@ def list_enrollments(
     )
 
 
+@router.put(
+    "/commercial-closures/{campaign_id}/{reference_date}",
+    response_model=CommercialClosureResponse,
+)
+def replace_commercial_closure(
+    campaign_id: int,
+    reference_date: date,
+    payload: CommercialClosureWrite,
+    session: SessionDependency,
+) -> CommercialClosureResponse:
+    try:
+        with session.begin():
+            campaign = session.get(Campaign, campaign_id)
+            if campaign is None:
+                _error(404, "campaign_not_found", "Campaign was not found.")
+            closure = session.scalar(
+                select(CommercialClosure).where(
+                    CommercialClosure.campaign_id == campaign_id,
+                    CommercialClosure.reference_date == reference_date,
+                )
+            )
+            if closure is None:
+                closure = CommercialClosure(
+                    campaign_id=campaign_id,
+                    reference_date=reference_date,
+                    status=payload.status,
+                )
+                session.add(closure)
+            else:
+                closure.status = payload.status
+            session.flush()
+            response = _commercial_closure_response(closure, campaign.meta_campaign_id)
+        return response
+    except IntegrityError:
+        closure = session.scalar(
+            select(CommercialClosure).where(
+                CommercialClosure.campaign_id == campaign_id,
+                CommercialClosure.reference_date == reference_date,
+            )
+        )
+        if closure is None:
+            raise
+        campaign = session.get(Campaign, campaign_id)
+        if campaign is None:
+            raise
+        return _commercial_closure_response(closure, campaign.meta_campaign_id)
+
+
 @router.put("/enrollments/{record_id}", response_model=EnrollmentResponse)
 def replace_enrollment(
     record_id: int,
@@ -487,8 +576,16 @@ def replace_enrollment(
             campaign = session.get(Campaign, payload.campaign_id)
             if campaign is None:
                 _error(404, "campaign_not_found", "Campaign was not found.")
-            if _enrollment_duplicate(session, payload, excluding_id=record_id):
-                _error(409, "duplicate_enrollment", "Enrollment already exists.")
+            duplicate_id = _enrollment_duplicate(
+                session, payload, excluding_id=record_id
+            )
+            if duplicate_id is not None:
+                _error(
+                    409,
+                    "duplicate_enrollment",
+                    "Enrollment already exists.",
+                    record_id=duplicate_id,
+                )
             _apply_enrollment(enrollment, payload)
             session.flush()
             response = _enrollment_response(enrollment, campaign.meta_campaign_id)
@@ -570,6 +667,7 @@ def export_report(
         {"section": "filters", **summary["filters"]},
         {"section": "totals", **summary["totals"]},
         {"section": "kpis", **summary["kpis"]},
+        {"section": "commercial_coverage", **summary["commercial_coverage"]},
         *[{"section": "warning", **warning} for warning in summary["warnings"]],
     ]
     _write_sheet(workbook, "Resumo", summary_rows)
