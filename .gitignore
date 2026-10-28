@@ -11,5 +11,4 @@ htmlcov/
 data/*.db
 data/*.db-*
 !data/.gitkeep
-docs
 .logs

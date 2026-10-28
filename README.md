@@ -13,6 +13,28 @@ Streamlit, hardening operacional, lançamento diário seguro e leitura orientada
 à decisão. Não há integração
 com BotConversa nesta entrega.
 
+## Prioridade atual — preparação do mini-CRM
+
+A Fase 0 de auditoria e preparação arquitetural foi validada em 28/10/2026.
+Analytics continua funcional e preservado; o pacote `crm/` contém apenas uma
+docstring. Não há captura de leads individuais, login ou interface comercial.
+
+- [Auditoria e inventário A/B/C/D](docs/TECHNICAL_AUDIT.md)
+- [Arquitetura atual e proposta modular](docs/ARCHITECTURE.md)
+- [Roadmap CRM fases 0–5](docs/CRM_ROADMAP.md)
+- [Modelo e planejamento PostgreSQL](docs/CRM_DATA_MODEL.md)
+- [Integração futura Lead Ads](docs/META_LEAD_ADS_INTEGRATION.md)
+
+Próximo incremento recomendado: contrato mínimo de Lead/LeadActivity, migration
+aditiva e testes de idempotência em SQLite temporário. Não foi iniciado.
+`PLAN.md`, `PLAN-2.md` e `PRODUCT_REVIEW.md` permanecem históricos; a prioridade
+9D/matrícula individual foi subordinada ao roadmap CRM. O runbook local em
+`OPERATIONS.md` permanece aplicável, sem constituir plano de deploy remoto.
+
+Baseline e pós: 215 testes aprovados, dois avisos conhecidos. QA confirmou
+OpenAPI completo inalterado, import/startup demo e Alembic em banco temporário.
+Nenhuma conexão Meta real, PostgreSQL, deploy ou UI E2E foi validada.
+
 ## Requisitos
 
 - Python 3.12, 3.13 ou 3.14
