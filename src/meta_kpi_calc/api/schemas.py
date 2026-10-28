@@ -266,6 +266,29 @@ class CampaignComparisonResponse(ApiModel):
     commercial_coverage: CommercialCoverageResponse
 
 
+class DetailedCampaignComparisonResponse(ApiModel):
+    """Complete KPI snapshot for one campaign in a multi-campaign comparison."""
+
+    id: int
+    meta_campaign_id: str
+    name: str
+    brand: CampaignBrand
+    course: str | None
+    effective_status: str | None
+    spend: Decimal
+    leads: int
+    contracted_enrollments: int
+    paying_enrollments: int
+    financial_cac: Decimal | None
+    received_revenue: Decimal
+    contribution_margin: Decimal | None
+    totals: KpiTotalsResponse
+    kpis: CalculatedKpisResponse
+    warnings: list[KpiWarningResponse]
+    last_media_sync_at: datetime | None
+    commercial_coverage: CommercialCoverageResponse
+
+
 class DashboardSummaryResponse(ApiModel):
     filters: DashboardFiltersResponse
     totals: KpiTotalsResponse

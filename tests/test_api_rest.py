@@ -1024,6 +1024,74 @@ def test_dashboard_comparison_summary_sync_status_and_default_period_are_local(
     assert "commercial_coverage_status" in headers
 
 
+def test_detailed_campaign_comparison_preserves_selection_order_and_all_kpis(
+    migrated_database: tuple[Settings, Database],
+) -> None:
+    settings, database = migrated_database
+    first = add_campaign(database, "detail-first", brand=CampaignBrand.RCTEC)
+    second = add_campaign(database, "detail-second", brand=CampaignBrand.RCTEC)
+    outsider = add_campaign(database, "detail-outsider", brand=CampaignBrand.FECAF)
+    add_insight(database, first, DAY_1)
+    add_insight(database, second, DAY_1)
+    params = [
+        ("date_start", DAY_1.isoformat()),
+        ("date_stop", DAY_1.isoformat()),
+        ("brand", "RCTEC"),
+        ("campaign_ids", str(second)),
+        ("campaign_ids", str(first)),
+    ]
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/api/dashboard/campaign-comparison/detail", params=params)
+        export = client.get("/api/dashboard/campaign-comparison/export", params=params)
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert [row["id"] for row in rows] == [second, first]
+    assert set(rows[0]["totals"]) >= {
+        "spend",
+        "qualified_leads",
+        "expected_revenue",
+        "received_revenue",
+    }
+    assert set(rows[0]["kpis"]) >= {
+        "financial_cac",
+        "received_roas",
+        "received_advertising_roi",
+    }
+    assert rows[0]["contribution_margin"] is None
+    assert "warnings" in rows[0]
+    assert "last_media_sync_at" in rows[0]
+    assert outsider not in [row["id"] for row in rows]
+    assert export.status_code == 200
+    workbook = load_workbook(BytesIO(export.content), data_only=False)
+    assert workbook.sheetnames == ["Comparação"]
+    headers = [cell.value for cell in workbook["Comparação"][1]]
+    assert "total_spend" in headers
+    assert "kpi_financial_cac" in headers
+    assert "warning_codes" in headers
+    assert "warning_messages" in headers
+    assert "contribution_margin" in headers
+
+
+@pytest.mark.parametrize(
+    "campaign_values",
+    [([],), (["1"],), (["1", "1"],)],
+)
+def test_detailed_campaign_comparison_rejects_invalid_selection(
+    migrated_database: tuple[Settings, Database], campaign_values: tuple[list[str]],
+) -> None:
+    settings, _ = migrated_database
+    params: list[tuple[str, str]] = [
+        ("date_start", DAY_1.isoformat()),
+        ("date_stop", DAY_1.isoformat()),
+    ] + [("campaign_ids", value) for value in campaign_values[0]]
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/api/dashboard/campaign-comparison/detail", params=params)
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "invalid_campaign_selection"
+
+
 def test_local_sync_status_and_default_period_are_unknown_without_rows(
     migrated_database: tuple[Settings, Database],
 ) -> None:
@@ -1248,6 +1316,74 @@ def test_frontend_duplicate_and_zero_checks_use_server_filtered_totals(
     assert frontend_app._editable_records(
         visible_records, 7, duplicate_outside_page
     )[-1] == duplicate_outside_page
+
+
+def test_frontend_comparison_loads_all_campaign_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = Path(__file__).resolve().parents[1] / "frontend" / "app.py"
+    spec = spec_from_file_location("frontend_app", path)
+    assert spec is not None and spec.loader is not None
+    frontend_app = module_from_spec(spec)
+    spec.loader.exec_module(frontend_app)
+
+    first_page = {"items": [{"id": index} for index in range(100)], "total": 101}
+    second_page = {"items": [{"id": 100}], "total": 101}
+    request = Mock(side_effect=[first_page, second_page])
+    monkeypatch.setattr(frontend_app, "_request", request)
+
+    result = frontend_app._comparison_campaigns(
+        Mock(spec=httpx.Client), {"date_start": DAY_1.isoformat(), "date_stop": DAY_2.isoformat()}
+    )
+
+    assert result is not None
+    assert len(result) == 101
+    assert request.call_count == 2
+    assert request.call_args_list[1].kwargs["params"]["offset"] == 100
+
+
+def test_frontend_comparison_clears_export_when_selection_changes() -> None:
+    path = Path(__file__).resolve().parents[1] / "frontend" / "app.py"
+    spec = spec_from_file_location("frontend_app", path)
+    assert spec is not None and spec.loader is not None
+    frontend_app = module_from_spec(spec)
+    spec.loader.exec_module(frontend_app)
+
+    class FakeStreamlit:
+        session_state = {
+            "comparison_export": b"old report",
+            "comparison_export_scope": {"campaign_ids": [1, 2]},
+        }
+
+    frontend_app._clear_stale_comparison_export(
+        FakeStreamlit(), {"campaign_ids": [1]}
+    )
+
+    assert FakeStreamlit.session_state == {}
+
+
+def test_frontend_comparison_distinguishes_missing_media_and_unaggregated_margin() -> None:
+    path = Path(__file__).resolve().parents[1] / "frontend" / "app.py"
+    spec = spec_from_file_location("frontend_app", path)
+    assert spec is not None and spec.loader is not None
+    frontend_app = module_from_spec(spec)
+    spec.loader.exec_module(frontend_app)
+
+    campaign = {"totals": {"insight_count": 0}, "warnings": []}
+    assert (
+        frontend_app._comparison_missing_value(campaign, "totals", "spend", 0)
+        == "Dado ausente: sem insight no recorte"
+    )
+    assert frontend_app._comparison_missing_value(
+        campaign, "totals", "contracted_enrollments", 0
+    ) == ""
+    assert frontend_app._comparison_missing_value(
+        campaign, "unavailable", "contribution_margin", None
+    ) == "Não agregada neste recorte"
+    assert any(
+        label == "Margem de contribuição"
+        for _group, label, _key, _unit in frontend_app.COMPARISON_TOTAL_CATALOG
+    )
 
 
 def test_frontend_uses_local_health_default_period_and_current_export_scope() -> None:

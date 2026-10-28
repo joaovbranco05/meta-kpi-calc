@@ -479,6 +479,231 @@ def _campaigns(
             st.error("Não foi possível atualizar a classificação.")
 
 
+COMPARISON_TOTAL_CATALOG = (
+    ("Mídia", "Investimento", "spend", "currency"),
+    ("Mídia", "Alcance", "reach", "integer"),
+    ("Mídia", "Impressões", "impressions", "integer"),
+    ("Mídia", "Cliques", "clicks", "integer"),
+    ("Mídia", "Cliques no link", "inline_link_clicks", "integer"),
+    ("Mídia", "Leads", "leads", "integer"),
+    ("Mídia", "Leads qualificados", "qualified_leads", "integer"),
+    ("Mídia", "CTR informado pela Meta", "meta_ctr", "percent"),
+    ("Mídia", "CPC informado pela Meta", "meta_cpc", "currency"),
+    ("Mídia", "CPM informado pela Meta", "meta_cpm", "currency"),
+    ("Mídia", "Frequência", "frequency", "multiple"),
+    ("Mídia", "Insights", "insight_count", "integer"),
+    ("Comercial", "Contratadas", "contracted_enrollments", "integer"),
+    ("Comercial", "Pagantes", "paying_enrollments", "integer"),
+    ("Comercial", "Cancelamentos", "cancellations", "integer"),
+    ("Comercial", "Receita esperada", "expected_revenue", "currency"),
+    ("Comercial", "Receita recebida", "received_revenue", "currency"),
+    ("Comercial", "Margem de contribuição", "contribution_margin", "unavailable"),
+)
+
+
+def _comparison_params(
+    filters: dict[str, str], campaign_ids: list[int]
+) -> dict[str, object]:
+    return {
+        **{key: value for key, value in filters.items() if key != "campaign_id"},
+        "campaign_ids": campaign_ids,
+    }
+
+
+def _comparison_missing_value(
+    campaign: dict[str, Any], source: str, key: str, value: Any
+) -> str:
+    insight_count = campaign.get("totals", {}).get("insight_count", 0)
+    if source == "totals" and key in {
+        "spend",
+        "reach",
+        "impressions",
+        "clicks",
+        "inline_link_clicks",
+        "leads",
+        "qualified_leads",
+        "meta_ctr",
+        "meta_cpc",
+        "meta_cpm",
+        "frequency",
+        "insight_count",
+    } and insight_count == 0:
+        return "Dado ausente: sem insight no recorte"
+    if value is not None:
+        return ""
+    if source == "unavailable":
+        return "Não agregada neste recorte"
+    warning_codes = {warning["code"] for warning in campaign.get("warnings", [])}
+    if key in {"reach", "frequency", "meta_ctr", "meta_cpc", "meta_cpm"} and "NON_ADDITIVE_METRICS_OMITTED" in warning_codes:
+        return "Não calculável: métrica não aditiva"
+    if key in {"qualified_leads", "qualification_rate", "cpql"} and "QUALIFIED_LEADS_INCOMPLETE" in warning_codes:
+        return "Não calculável: qualificados incompletos"
+    return "Não calculável: denominador zero"
+
+
+def _comparison_matrix_rows(
+    campaigns: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    definitions = [
+        (group, label, "totals", key, unit)
+        for group, label, key, unit in COMPARISON_TOTAL_CATALOG
+    ] + [
+        (group, label, "kpis", key, unit)
+        for key, label, group, unit, _formula, _interpretation in KPI_CATALOG
+    ]
+    rows: list[dict[str, str]] = []
+    for group, label, source, key, unit in definitions:
+        row = {"Grupo": group, "Indicador": label}
+        for campaign in campaigns:
+            value = None if source == "unavailable" else campaign[source][key]
+            missing = _comparison_missing_value(campaign, source, key, value)
+            row[campaign["name"] + " — " + campaign["meta_campaign_id"]] = (
+                missing
+                if missing
+                else _format_metric(value, unit)
+            )
+        rows.append(row)
+    return rows
+
+
+def _comparison_campaigns(
+    client: httpx.Client, filters: dict[str, str]
+) -> list[dict[str, Any]] | None:
+    """Load every campaign in the filtered scope for the multiselect."""
+    params = {**_campaign_params(filters), "offset": 0, "limit": 100}
+    page = _request(client, "GET", "/api/campaigns", params=params)
+    if page is None:
+        return None
+
+    items = list(page["items"])
+    total = int(page["total"])
+    while len(items) < total:
+        next_page = _request(
+            client,
+            "GET",
+            "/api/campaigns",
+            params={**params, "offset": len(items)},
+        )
+        if next_page is None or not next_page["items"]:
+            return None
+        items.extend(next_page["items"])
+    return items if len(items) >= total else None
+
+
+def _clear_stale_comparison_export(st: Any, export_scope: dict[str, object]) -> None:
+    if st.session_state.get("comparison_export_scope") != export_scope:
+        st.session_state.pop("comparison_export", None)
+        st.session_state.pop("comparison_export_scope", None)
+
+
+def _compare_campaigns(st: Any, client: httpx.Client, filters: dict[str, str]) -> None:
+    """Render the detailed, multi-campaign comparison without external calls."""
+    st.subheader("Comparar campanhas")
+    scope_filters = {key: value for key, value in filters.items() if key != "campaign_id"}
+    scope_key = tuple(sorted(scope_filters.items()))
+    if st.session_state.get("comparison_scope") != scope_key:
+        st.session_state["comparison_scope"] = scope_key
+        st.session_state["comparison_campaign_ids"] = []
+        st.session_state.pop("comparison_export", None)
+        st.session_state.pop("comparison_export_scope", None)
+
+    items = _comparison_campaigns(client, scope_filters)
+    if items is None:
+        st.error("Não foi possível carregar campanhas para comparação.")
+        return
+    if len(items) < 2:
+        st.info("É necessário ter pelo menos duas campanhas no escopo.")
+        return
+    duplicate_names = {
+        item["name"]
+        for item in items
+        if sum(row["name"] == item["name"] for row in items) > 1
+    }
+    labels = {
+        item["id"]: _campaign_label(item, duplicate_names) for item in items
+    }
+    options = [item["id"] for item in items]
+    previous = [
+        campaign_id
+        for campaign_id in st.session_state.get("comparison_campaign_ids", [])
+        if campaign_id in options
+    ]
+    selected_ids = st.multiselect(
+        "Campanhas (selecione duas ou mais)",
+        options,
+        default=previous,
+        format_func=lambda campaign_id: labels[campaign_id],
+    )
+    st.session_state["comparison_campaign_ids"] = selected_ids
+    export_scope = {"filters": dict(scope_filters), "campaign_ids": list(selected_ids)}
+    _clear_stale_comparison_export(st, export_scope)
+    if len(selected_ids) < 2:
+        st.info("Selecione duas ou mais campanhas para comparar.")
+        return
+    comparison = _request(
+        client,
+        "GET",
+        "/api/dashboard/campaign-comparison/detail",
+        params=_comparison_params(scope_filters, selected_ids),
+    )
+    if comparison is None:
+        st.error("Não foi possível carregar a comparação detalhada.")
+        return
+    st.caption("Os indicadores mostram totais do recorte selecionado; não representam uma coorte.")
+    st.dataframe(_comparison_matrix_rows(comparison), hide_index=True, use_container_width=True)
+    st.subheader("Cobertura e pendências")
+    st.dataframe(
+        [
+            {
+                "Campanha": labels.get(item["id"], item["name"]),
+                "Cobertura comercial": COMMERCIAL_COVERAGE_LABELS[item["commercial_coverage"]["status"]],
+                "Dias esperados": item["commercial_coverage"]["expected_units"],
+                "Dias sem confirmação": item["commercial_coverage"]["unknown_units"],
+                "Dias parciais": item["commercial_coverage"]["partial_units"],
+                "Dias fechados": item["commercial_coverage"]["complete_units"],
+                "Última atualização de mídia": _format_date(item["last_media_sync_at"]),
+                "Pendências": len(item["warnings"]),
+            }
+            for item in comparison
+        ],
+        hide_index=True,
+        use_container_width=True,
+    )
+    warning_rows = [
+        {
+            "Campanha": labels.get(item["id"], item["name"]),
+            "Código": warning["code"],
+            "Motivo": WARNING_MESSAGES.get(warning["code"], warning["message"]),
+        }
+        for item in comparison
+        for warning in item["warnings"]
+    ]
+    if warning_rows:
+        st.dataframe(warning_rows, hide_index=True, use_container_width=True)
+    else:
+        st.caption("Nenhuma pendência ou inconsistência registrada para as campanhas selecionadas.")
+    if st.button("Preparar exportação da comparação"):
+        try:
+            response = client.get(
+                f"{API_BASE_URL}/api/dashboard/campaign-comparison/export",
+                params=_comparison_params(scope_filters, selected_ids),
+                timeout=10,
+            )
+            response.raise_for_status()
+        except (httpx.HTTPError, ValueError):
+            st.error("Não foi possível preparar a comparação.")
+        else:
+            st.session_state["comparison_export"] = response.content
+            st.session_state["comparison_export_scope"] = export_scope
+    if report := st.session_state.get("comparison_export"):
+        st.download_button(
+            "Baixar comparação XLSX",
+            data=report,
+            file_name="meta-kpi-comparacao.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+
 def _set_enrollment_form_values(st: Any, record: dict[str, Any] | None, campaign: dict[str, Any]) -> None:
     st.session_state.update(
         {
@@ -848,11 +1073,13 @@ def main() -> None:
                 client, "GET", f"/api/campaigns/{filters['campaign_id']}"
             )
         sync_state = _request(client, "GET", "/api/meta/sync/status")
-        overview, campaigns, enrollments, sync, export = st.tabs(["Visão geral", "Campanhas", "Lançamentos diários", "Sincronização", "Exportar"])
+        overview, campaigns, comparison, enrollments, sync, export = st.tabs(["Visão geral", "Campanhas", "Comparar campanhas", "Lançamentos diários", "Sincronização", "Exportar"])
         with overview:
             _overview(st, client, filters, selected_campaign)
         with campaigns:
             _campaigns(st, client, filters, selected_campaign)
+        with comparison:
+            _compare_campaigns(st, client, filters)
         with enrollments:
             _enrollments(st, client, filters, selected_campaign)
         with sync:

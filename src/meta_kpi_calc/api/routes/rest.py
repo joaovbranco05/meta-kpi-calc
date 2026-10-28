@@ -26,6 +26,7 @@ from meta_kpi_calc.api.schemas import (
     ConnectionResponse,
     DashboardFiltersResponse,
     DashboardDefaultPeriodResponse,
+    DetailedCampaignComparisonResponse,
     DashboardSummaryResponse,
     EnrollmentResponse,
     EnrollmentWrite,
@@ -251,6 +252,94 @@ def _campaign_comparison(
             )
         )
     return rows
+
+
+def _detailed_campaign_comparison(
+    session: Session, filters: ReportFilters, campaign_ids: list[int]
+) -> list[DetailedCampaignComparisonResponse]:
+    """Return complete, independently calculated metrics in requested order."""
+    campaigns = session.scalars(
+        select(Campaign).where(
+            Campaign.id.in_(campaign_ids), *filters.campaign_predicates()
+        )
+    ).all()
+    by_id = {campaign.id: campaign for campaign in campaigns}
+    missing = [campaign_id for campaign_id in campaign_ids if campaign_id not in by_id]
+    if missing:
+        _error(
+            422,
+            "invalid_campaign_selection",
+            "Every selected campaign must be inside the active scope.",
+            campaign_ids=missing,
+        )
+
+    rows: list[DetailedCampaignComparisonResponse] = []
+    for campaign_id in campaign_ids:
+        campaign = by_id[campaign_id]
+        summary = summarize_kpis(
+            session,
+            filters.date_start,
+            filters.date_stop,
+            campaign_id=campaign.id,
+            brand=filters.brand,
+            course=filters.course,
+            effective_status=filters.effective_status,
+        )
+        last_media_sync_at = session.scalar(
+            select(func.max(CampaignInsight.synced_at))
+            .where(
+                CampaignInsight.campaign_id == campaign.id,
+                CampaignInsight.date_start >= filters.date_start,
+                CampaignInsight.date_stop <= filters.date_stop,
+            )
+        )
+        rows.append(
+            DetailedCampaignComparisonResponse(
+                id=campaign.id,
+                meta_campaign_id=campaign.meta_campaign_id,
+                name=campaign.name,
+                brand=campaign.brand,
+                course=campaign.course,
+                effective_status=campaign.effective_status,
+                spend=summary.totals.spend,
+                leads=summary.totals.leads,
+                contracted_enrollments=summary.totals.contracted_enrollments,
+                paying_enrollments=summary.totals.paying_enrollments,
+                financial_cac=summary.kpis.financial_cac,
+                received_revenue=summary.totals.received_revenue,
+                contribution_margin=None,
+                totals=KpiTotalsResponse(**vars(summary.totals)),
+                kpis=CalculatedKpisResponse(**vars(summary.kpis)),
+                warnings=[
+                    KpiWarningResponse(**vars(warning))
+                    for warning in summary.warnings
+                ],
+                last_media_sync_at=last_media_sync_at,
+                commercial_coverage=CommercialCoverageResponse(
+                    **vars(summary.commercial_coverage)
+                ),
+            )
+        )
+    return rows
+
+
+def _validate_campaign_selection(
+    campaign_ids: list[int] | None, campaign_id: int | None
+) -> list[int]:
+    if campaign_id is not None:
+        _error(
+            422,
+            "invalid_campaign_selection",
+            "Use campaign_ids for a multi-campaign comparison.",
+        )
+    selected = campaign_ids or []
+    if len(selected) < 2 or len(set(selected)) != len(selected):
+        _error(
+            422,
+            "invalid_campaign_selection",
+            "Select at least two different campaigns.",
+        )
+    return selected
 
 
 def _safe_export_value(value: object) -> object:
@@ -728,6 +817,100 @@ def dashboard_campaign_comparison(
         effective_status,
     )
     return _campaign_comparison(session, filters)
+
+
+@router.get(
+    "/dashboard/campaign-comparison/detail",
+    response_model=list[DetailedCampaignComparisonResponse],
+)
+def dashboard_campaign_comparison_detail(
+    session: SessionDependency,
+    date_start: date,
+    date_stop: date,
+    campaign_ids: Annotated[list[int] | None, Query()] = None,
+    brand: CampaignBrand | None = None,
+    campaign_id: int | None = None,
+    course: str | None = None,
+    effective_status: str | None = None,
+) -> list[DetailedCampaignComparisonResponse]:
+    selected = _validate_campaign_selection(campaign_ids, campaign_id)
+    filters = _report_filters(
+        date_start,
+        date_stop,
+        brand,
+        None,
+        course,
+        effective_status,
+    )
+    return _detailed_campaign_comparison(session, filters, selected)
+
+
+@router.get("/dashboard/campaign-comparison/export")
+def export_campaign_comparison(
+    session: SessionDependency,
+    date_start: date,
+    date_stop: date,
+    campaign_ids: Annotated[list[int] | None, Query()] = None,
+    brand: CampaignBrand | None = None,
+    campaign_id: int | None = None,
+    course: str | None = None,
+    effective_status: str | None = None,
+) -> Response:
+    selected = _validate_campaign_selection(campaign_ids, campaign_id)
+    filters = _report_filters(
+        date_start,
+        date_stop,
+        brand,
+        None,
+        course,
+        effective_status,
+    )
+    rows = [item.model_dump() for item in _detailed_campaign_comparison(session, filters, selected)]
+    flattened: list[dict[str, object]] = []
+    for row in rows:
+        totals = row.pop("totals")
+        kpis = row.pop("kpis")
+        warnings = row.pop("warnings")
+        coverage = row.pop("commercial_coverage")
+        assert isinstance(totals, dict)
+        assert isinstance(kpis, dict)
+        assert isinstance(coverage, dict)
+        row.update({f"total_{key}": value for key, value in totals.items()})
+        row.update({f"kpi_{key}": value for key, value in kpis.items()})
+        row.update({f"coverage_{key}": value for key, value in coverage.items()})
+        row["warning_count"] = len(warnings) if isinstance(warnings, list) else 0
+        row["warning_codes"] = (
+            "; ".join(
+                str(warning.get("code", ""))
+                for warning in warnings
+                if isinstance(warning, dict) and warning.get("code")
+            )
+            if isinstance(warnings, list)
+            else ""
+        )
+        row["warning_messages"] = (
+            "; ".join(
+                str(warning.get("message", ""))
+                for warning in warnings
+                if isinstance(warning, dict) and warning.get("message")
+            )
+            if isinstance(warnings, list)
+            else ""
+        )
+        row["contribution_margin"] = "Não agregada neste recorte"
+        flattened.append(row)
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    _write_sheet(workbook, "Comparação", flattened)
+    output = BytesIO()
+    workbook.save(output)
+    return Response(
+        content=output.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="meta-kpi-comparacao.xlsx"'
+        },
+    )
 
 
 @router.get("/export")

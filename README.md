@@ -4,7 +4,7 @@ Aplicação local para consolidar métricas de campanhas da Meta e calcular KPIs
 de investimento, leads e matrículas da RCTEC, FECAF Florianópolis e Curso com
 Bolsa.
 
-Esta entrega contém as etapas 0 a 9B: contrato do MVP, configuração,
+Esta entrega contém as etapas 0 a 9C: contrato do MVP, configuração,
 infraestrutura SQLite/Alembic, endpoint de saúde, modelos de domínio, dados
 fictícios, serviço interno de KPIs, cliente Meta mock-first e serviço interno de
 sincronização com agendamento opcional, além da API REST local para conexão,
@@ -193,9 +193,11 @@ Para bancos existentes, aplique a migration antes de iniciar a aplicação:
 alembic upgrade head
 ```
 
-O lançamento diário, a cobertura e o painel foram validados localmente. As
-etapas 9A e 9B compõem a base para o piloto assistido; antes da liberação, ainda
-é necessário reconciliar uma janela curta com a fonte comercial do cliente.
+O lançamento diário, a cobertura, o painel e a comparação detalhada foram
+validados localmente. As etapas 9A e 9B compõem a base mínima para o piloto
+assistido; antes da liberação, ainda é necessário reconciliar uma janela curta
+com a fonte comercial do cliente. A etapa 9C acrescenta a comparação detalhada
+e permanece antes da evolução de matrícula individual da etapa 10.
 
 ## Dashboard, exportação e painel
 
@@ -210,6 +212,15 @@ linha por campanha com investimento, leads, contratadas, pagantes, CAC
 financeiro, receita recebida e cobertura comercial. `last_media_sync_at` no
 resumo informa a última carga de mídia no recorte. `GET /api/dashboard/default-period`
 informa o menor e maior dia de Insight persistido, sem consultar a Meta.
+
+`GET /api/dashboard/campaign-comparison/detail` exige `campaign_ids` repetidos
+para selecionar duas ou mais campanhas e devolve, na ordem escolhida, todos os
+totais e KPIs existentes, cobertura, avisos e última atualização de mídia. A
+aba **Comparar campanhas** percorre a listagem completa, aplica os filtros
+globais e exibe uma matriz com unidades e motivos para valores ausentes ou não
+calculáveis. A margem de contribuição aparece como não agregada neste recorte.
+`GET /api/dashboard/campaign-comparison/export` gera o XLSX da mesma seleção e
+inclui cobertura, códigos e mensagens dos avisos.
 
 `GET /api/meta/sync/status` informa apenas o último estado local persistido da
 sincronização (`running`, `completed`, `failed` ou `not_confirmed`); também não
