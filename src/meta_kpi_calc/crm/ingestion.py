@@ -35,7 +35,7 @@ class IngestResult:
 
 SOURCE_FIELDS = (
     "full_name", "phone_number", "email", "city", "state", "meta_created_time",
-    "meta_campaign_id", "meta_campaign_name", "meta_adset_id", "meta_adset_name",
+    "meta_page_id", "meta_campaign_id", "meta_campaign_name", "meta_adset_id", "meta_adset_name",
     "meta_ad_id", "meta_ad_name", "meta_form_id", "meta_form_name", "source_status",
     "is_organic", "platform", "source",
 )
@@ -78,7 +78,13 @@ def ingest_lead(session: Session, submission: LeadSubmission) -> IngestResult:
     changed: list[str] = []
     for field in SOURCE_FIELDS:
         value = values.get(field)
-        if value is not None and getattr(lead, field) != value:
+        current = getattr(lead, field)
+        if field == "meta_created_time" and current is not None and value is not None:
+            # SQLite reads timezone-aware columns as naive. Both ingestion sources
+            # write UTC; compare instants so an identical replay creates no activity.
+            current = current.replace(tzinfo=timezone.utc) if current.tzinfo is None else current.astimezone(timezone.utc)
+            value = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+        if value is not None and current != value:
             setattr(lead, field, value)
             changed.append(field)
     if campaign is not None and lead.campaign_id != campaign.id:

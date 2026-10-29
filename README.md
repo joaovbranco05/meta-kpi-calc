@@ -4,8 +4,9 @@ Aplicação local para consolidar métricas de campanhas da Meta e calcular KPIs
 de investimento, leads e matrículas da RCTEC, FECAF Florianópolis e Curso com
 Bolsa.
 
-Esta entrega contém as etapas 0 a 9C de Analytics e a Fase1 do mini-CRM:
-modelagem e persistência de leads, importação local e API CRM de uso local.
+Esta entrega contém Analytics até 9C, a Fase 1 do mini-CRM local e a
+implementação técnica Lead Ads 2A, validada apenas com mocks. A integração real
+2B não foi executada. Modelagem de leads, importação e API CRM são preservadas.
 Inclui contrato do MVP, configuração,
 infraestrutura SQLite/Alembic, endpoint de saúde, modelos de domínio, dados
 fictícios, serviço interno de KPIs, cliente Meta mock-first e serviço interno de
@@ -17,9 +18,10 @@ com BotConversa nesta entrega.
 
 ## Prioridade atual — mini-CRM local
 
-A Fase 0 foi concluída e a Fase1 implementa leads individuais, histórico e
-ingestão por arquivo/API local. Analytics continua funcional e preservado. Não
-há login, interface comercial ou captura automática da Meta.
+A Fase 0 e a fundação local Fase 1 estão preservadas. Fase 2A acrescenta cliente
+Graph, webhook assinado, inbox e recuperação manual; integração real 2B segue
+pendente. Analytics permanece funcional. Não há login, interface comercial,
+PostgreSQL ou deploy. Não exponha a API privada para publicar o webhook.
 
 - [Auditoria e inventário A/B/C/D](docs/TECHNICAL_AUDIT.md)
 - [Arquitetura atual e proposta modular](docs/ARCHITECTURE.md)
@@ -27,7 +29,7 @@ há login, interface comercial ou captura automática da Meta.
 - [Modelo e planejamento PostgreSQL](docs/CRM_DATA_MODEL.md)
 - [Integração futura Lead Ads](docs/META_LEAD_ADS_INTEGRATION.md)
 
-### Contrato local da Fase1
+### Contrato local da Fase 1
 
 `Lead` representa uma submissão individual e usa `meta_lead_id` textual único;
 telefone/e-mail não são chaves únicas. Os campos observados da planilha são
@@ -63,17 +65,102 @@ autenticação e não autoriza publicação via proxy ou host remoto.
 
 As alterações detalhadas estão descritas em `docs/CRM_DATA_MODEL.md`,
 `docs/CRM_ROADMAP.md`, `docs/ARCHITECTURE.md`, `docs/STATUS.md` e
-`docs/OPERATIONS.md` na cópia local. A regra de exclusão local do Git impede que
-esses arquivos apareçam no diff desta sessão.
+`docs/OPERATIONS.md`; esses documentos acompanham a implementação no repositório.
 
-Próximo incremento: integração Meta Lead Ads (Fase2), ainda sem webhook ou
-chamada real nesta entrega.
-`PLAN.md`, `PLAN-2.md` e `PRODUCT_REVIEW.md` permanecem históricos; a prioridade
-9D/matrícula individual foi subordinada ao roadmap CRM. O runbook local em
-`OPERATIONS.md` permanece aplicável, sem constituir plano de deploy remoto.
+### Integração Lead Ads — Gate 2A local
 
-Validação e status desta Fase1 são registrados em `docs/STATUS.md`.
-Nenhuma conexão Meta real, PostgreSQL, deploy ou UI E2E foi feita.
+Implementação técnica local validada; Gate 2B **não executado**. Baseline Fase 1:
+228 testes aprovados. Após implementação e correções de revisão:
+`pytest -q` — **283 aprovados, 2 avisos conhecidos, 61,20s**;
+`compileall` e `git diff --check` aprovados. Nenhuma chamada Meta real foi realizada.
+
+Fluxo: POST assinado → commit inbox → ACK; CLI worker → claim/commit → GET
+Graph → normalização → fence + ingest_lead + COMPLETED numa transação.
+Reconciliação manual percorre todas as páginas da fonte autorizada, filtra UTC
+localmente e só avança checkpoint ao concluir o scan. HTTP fica fora de
+transações. O `MetaClient` Analytics não foi alterado.
+
+- Migration `0006_lead_ads_inbox`: WebhookEvent, ReconciliationState e coluna
+  nullable `Lead.meta_page_id`. Alembic segue autoridade única; nenhuma migration
+  histórica ou fórmula foi alterada. Execute migrations antes dos comandos.
+- `GET /webhooks/meta/lead-ads` valida hub.mode/verify_token e retorna challenge.
+  `POST` limita stream a 256 KiB por padrão, valida HMAC-SHA256 raw-body pelo
+  `X-Hub-Signature-256`, valida batch/Páginas e confirma só após commit durável.
+  Integração incompleta/desabilitada ou modo demo retorna 503, sem bypass HMAC.
+- Cliente HTTPX injetado: somente GET Graph fixo, bearer no header, redirects
+  bloqueados, timeouts explícitos, paginação reconstruída por cursor confiável
+  com cap local, erro fixo sem raw. Sem retry em memória/sleep. Versão Lead Ads
+  é independente e obrigatoriamente explícita; nenhuma versão atual é presumida.
+- Inbox deduplica por Página+lead; worker adquire lease com UPDATE atômico,
+  tenta no máximo 5 claims por evento por padrão, backoff de 30s até 3600s; recupera
+  lease expirada após reinício. Fence impede worker antigo de gravar ou concluir.
+  Duplicação não reseta COMPLETED/FAILED. SQLite é single-host com escritas
+  serializadas, sem garantia exactly-once distribuída.
+- Reconciliação: mapping form→page, primeiro start UTC explícito e end opcional capturado no início,
+  overlap de 300s e máximo de 31 dias locais por padrão; sem filtro Graph não confirmado.
+  Próxima scan começa novamente na primeira página a partir de checkpoint-overlap;
+  timeout/cap/payload inválido/falha de banco não avança checkpoint. Start explícito que
+  deixe lacuna depois do checkpoint é rejeitado. Lease por formulário impede
+  scans simultâneos e protege avanço final.
+- `field_data`: full_name/phone_number/email/city/state conhecidos; sem inferir
+  DDD/curso. Perguntas desconhecidas geram contador `unmapped_fields`, sem nomes
+  ou respostas retidos; resultado pode ser incompleto. Antes do 2B, perguntas
+  essenciais precisam de mapeamento explícito. Replay preserva status/notas/
+  campos locais; igualdade de timestamp considera UTC ao ler SQLite naive.
+
+Configuração em `.env.example`: `LEAD_ADS_ENABLED=false` por padrão; segredos
+`LEAD_ADS_ACCESS_TOKEN`, `LEAD_ADS_APP_SECRET`, `LEAD_ADS_VERIFY_TOKEN` separados,
+sem fallback de Ads; `LEAD_ADS_API_VERSION` sem default;
+`LEAD_ADS_ALLOWED_PAGE_IDS` é lista JSON; `LEAD_ADS_AUTHORIZED_SOURCES` é mapping
+JSON formulário→Página. Os demais `LEAD_ADS_*` definem limites locais, não regras
+oficiais da Meta. Nenhuma credencial existente foi alterada.
+
+Comando local sem rede (banco existente migrado; URLs relativas são resolvidas
+uma vez contra cwd e canonicalizadas antes de Settings):
+
+```bash
+PYTHONPATH=src python -m meta_kpi_calc.crm.lead_ads_cli status \
+  --database-url sqlite:////caminho/absoluto/banco-migrado.db
+```
+
+`status` retorna contagens de eventos/tentativas/estados de reconciliação, idade
+de pendência e última reconciliação, sem IDs ou PII. Comandos de rede futuros
+`process` e `reconcile` exigem `DEMO_MODE=false`, configuração habilitada/token/
+versão e flag `--allow-network`, além de banco selecionado. Process aceita
+`--max-events`; reconcile requer `--form-id` autorizado e `--start` no primeiro
+scan, com `--end` opcional. **Não executados nesta entrega**. Nada é iniciado
+por lifespan, scheduler ou abrir painel.
+
+Logging redige os três segredos, URLs Graph/cursors e query hub.verify_token;
+filtro dedicado uvicorn.access cobre propagate=false. Logs de proxies externos
+exigem redação/desativação própria antes de expor HTTPS. Não guardar raw,
+contatos, tokens ou exportações reais em logs/fixtures/Git.
+
+As páginas oficiais developers.facebook.com retornaram 429. Contratos mínimos
+foram fundamentados em [solução Meta-owned](https://github.com/facebookincubator/catalogue-of-api-solutions/blob/main/solutions/leads/leads-retrieval-set-up-checker.md),
+[sample Lead Ads arquivado](https://github.com/fbsamples/lead-ads-webhook-sample/blob/main/README.md)
+e [exemplo oficial HMAC](https://github.com/fbsamples/whatsapp-api-examples/blob/main/signature-validation-with-webhooks-payloads/app.py).
+Isso não confirma suporte atual de versão/permissões/token ou retenção.
+
+### Gate 2B — próximos passos, sem execução autorizada
+
+1. No Meta for Developers, confirmar app, versão Graph atual e permissões para
+   leads/Páginas; conferir acesso da empresa e da pessoa responsável à Página.
+2. Escolher Página e formulário de teste e conferir os campos essenciais.
+   Token Insights não é automaticamente token Lead Ads.
+3. Configurar os três segredos no ambiente/secret manager, nunca no chat/Git;
+   verificar expiração, revogação e procedimento de renovação atual.
+4. Aprovar HTTPS somente para webhook, proteger API privada e logs. Não houve
+   túnel/deploy; qualquer exposição depende de autorização própria.
+5. Configurar callback e verify token no painel Meta; completar verificação e
+   inscrever Página no evento leadgen conforme documentação vigente.
+6. Criar lead fictício pela ferramenta oficial; conferir inbox, executar worker
+   explicitamente e verificar Lead/histórico. Reenviar para provar idempotência.
+7. Ensaiar falha/reinício/reconciliação e conferir contagens; aprovar política
+   RCTEC de acesso, retenção e campos personalizados antes de dados reais.
+
+Os detalhes de arquitetura, status, roadmap e operação estão versionados em
+`docs/`. Não houve commit, push ou merge durante a 2A.
 
 ## Requisitos
 

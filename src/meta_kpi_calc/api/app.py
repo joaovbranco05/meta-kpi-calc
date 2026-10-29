@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from meta_kpi_calc.api.routes.health import router as health_router
 from meta_kpi_calc.api.routes.rest import router as rest_router
 from meta_kpi_calc.crm.api import router as crm_router
+from meta_kpi_calc.crm.webhook import router as lead_ads_webhook_router
 from meta_kpi_calc.core.config import Settings, get_settings
 from meta_kpi_calc.core.logging import configure_logging
 from meta_kpi_calc.db.session import Database
@@ -101,6 +102,7 @@ def create_app(
     application.include_router(health_router)
     application.include_router(rest_router)
     application.include_router(crm_router)
+    application.include_router(lead_ads_webhook_router)
 
     @application.exception_handler(RequestValidationError)
     async def validation_error(

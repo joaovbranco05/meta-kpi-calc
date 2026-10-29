@@ -71,6 +71,7 @@ class Lead(Base):
     city: Mapped[str | None] = mapped_column(String(255))
     state: Mapped[str | None] = mapped_column(String(128))
     meta_created_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    meta_page_id: Mapped[str | None] = mapped_column(String(64))
     meta_campaign_id: Mapped[str | None] = mapped_column(String(64))
     meta_campaign_name: Mapped[str | None] = mapped_column(String(255))
     meta_adset_id: Mapped[str | None] = mapped_column(String(64))

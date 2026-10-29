@@ -20,14 +20,18 @@ SENSITIVE_KEYS = {
 
 
 def redact_text(value: str, secrets: Sequence[str] = ()) -> str:
+    # HTTPX logs request URLs at INFO, including external lead IDs/cursors.
+    redacted = re.sub(r"https://graph\.facebook\.com[^\s\"'<>]*", "[REDACTED_META_URL]", value)
     redacted = re.sub(
-        r"(?i)\bBearer\s+[^\s,;]+", f"Bearer {REDACTED}", value
+        r"(?i)\bBearer\s+[^\s,;]+", f"Bearer {REDACTED}", redacted
     )
     redacted = re.sub(
         r"(?i)(access_token(?:=|\s*:\s*)[\"']?)[^\s&;,\"']+",
         rf"\1{REDACTED}",
         redacted,
     )
+    redacted = re.sub(r'(?i)(hub(?:\.|%2e)verify_token(?:=|%3d))[^\s&"\']*',
+                      rf"\1{REDACTED}", redacted)
     for secret in secrets:
         if secret:
             redacted = redacted.replace(secret, REDACTED)
@@ -85,17 +89,23 @@ class RedactingFilter(logging.Filter):
 
 def configure_logging(settings: Settings) -> None:
     root = logging.getLogger()
-    token = (
-        settings.meta_access_token.get_secret_value()
-        if settings.meta_access_token
-        else ""
-    )
+    secrets = tuple(value.get_secret_value() for value in (
+        settings.meta_access_token, settings.lead_ads_access_token,
+        settings.lead_ads_app_secret, settings.lead_ads_verify_token,
+    ) if value is not None)
 
     for handler in list(root.handlers):
         if getattr(handler, "_meta_kpi_handler", False):
             root.removeHandler(handler)
 
-    redacting_filter = RedactingFilter((token,))
+    redacting_filter = RedactingFilter(secrets)
+    # Uvicorn access logs commonly do not propagate to root. Filter the logger
+    # itself so both current and subsequently attached access handlers are safe.
+    access_logger = logging.getLogger("uvicorn.access")
+    for existing_filter in list(access_logger.filters):
+        if isinstance(existing_filter, RedactingFilter):
+            access_logger.removeFilter(existing_filter)
+    access_logger.addFilter(RedactingFilter(secrets))
     for existing_handler in root.handlers:
         for existing_filter in list(existing_handler.filters):
             if isinstance(existing_filter, RedactingFilter):
@@ -108,7 +118,7 @@ def configure_logging(settings: Settings) -> None:
     handler.setFormatter(
         RedactingFormatter(
             "%(asctime)s %(levelname)s %(name)s %(message)s",
-            secrets=(token,),
+            secrets=secrets,
         )
     )
     root.addHandler(handler)

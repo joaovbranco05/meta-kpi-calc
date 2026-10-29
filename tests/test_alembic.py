@@ -43,7 +43,7 @@ def test_alembic_domain_schema_is_persisted_and_reversible(tmp_path: Path) -> No
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-    assert revision == ("0005_crm_leads",)
+    assert revision == ("0006_lead_ads_inbox",)
     assert "qualified_leads" in columns
     assert {
         "campaigns",
@@ -128,3 +128,27 @@ def test_qualified_leads_migration_preserves_existing_rows_as_unknown(
         ).fetchone()
 
     assert value == (None,)
+
+
+def test_lead_ads_migration_preserves_phase_one_rows_and_matches_metadata(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    database = tmp_path / "lead-ads-upgrade.db"
+    run_alembic(project_root, database, "upgrade", "0005_crm_leads")
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO leads (meta_lead_id, commercial_status) VALUES ('synthetic-migration-id', 'CONTACTED')")
+        connection.execute("INSERT INTO lead_activities (lead_id, activity_type, actor_type, note) VALUES (1, 'NOTE', 'LOCAL_OPERATOR', 'Synthetic note')")
+    run_alembic(project_root, database, "upgrade", "head")
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT meta_lead_id, commercial_status, meta_page_id FROM leads").fetchone() == ("synthetic-migration-id", "CONTACTED", None)
+        assert connection.execute("SELECT note FROM lead_activities").fetchone() == ("Synthetic note",)
+        assert {"webhook_events", "lead_reconciliation_states"} <= {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    # A clean metadata comparison is a separate guarantee from successful DDL.
+    environment = os.environ.copy()
+    environment.update(DEMO_MODE="true", DATABASE_URL=f"sqlite:///{tmp_path / 'real.db'}", DEMO_DATABASE_URL=f"sqlite:///{database}")
+    subprocess.run([sys.executable, "-m", "alembic", "check"], cwd=project_root,
+                   env=environment, check=True, capture_output=True, text=True)
+    run_alembic(project_root, database, "downgrade", "0005_crm_leads")
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT meta_lead_id, commercial_status FROM leads").fetchone() == ("synthetic-migration-id", "CONTACTED")
+        assert "meta_page_id" not in {row[1] for row in connection.execute("PRAGMA table_info(leads)")}
+    run_alembic(project_root, database, "upgrade", "head")

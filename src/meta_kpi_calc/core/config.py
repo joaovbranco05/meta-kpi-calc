@@ -1,5 +1,6 @@
 """Validated settings with deterministic SQLite paths."""
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -50,11 +51,56 @@ class Settings(BaseSettings):
         default_factory=lambda: ["lead", "onsite_conversion.lead_grouped"]
     )
 
+    # Independent credentials: Ads credentials never authorize Lead Ads implicitly.
+    lead_ads_enabled: bool = False
+    lead_ads_api_version: str | None = None
+    lead_ads_access_token: SecretStr | None = None
+    lead_ads_app_secret: SecretStr | None = None
+    lead_ads_verify_token: SecretStr | None = None
+    lead_ads_allowed_page_ids: list[str] = Field(default_factory=list)
+    lead_ads_authorized_sources: dict[str, str] = Field(default_factory=dict)
+    lead_ads_body_max_bytes: int = Field(default=262144, ge=1024, le=1048576)
+    lead_ads_max_pages: int = Field(default=100, ge=1, le=1000)
+    lead_ads_page_size: int = Field(default=100, ge=1, le=1000)
+    lead_ads_max_attempts: int = Field(default=5, ge=1, le=20)
+    lead_ads_lease_seconds: int = Field(default=120, ge=30, le=3600)
+    lead_ads_retry_base_seconds: int = Field(default=30, ge=1, le=3600)
+    lead_ads_retry_max_seconds: int = Field(default=3600, ge=1, le=86400)
+    lead_ads_overlap_seconds: int = Field(default=300, ge=0, le=86400)
+    lead_ads_scan_max_days: int = Field(default=31, ge=1, le=365)
+
     scheduler_enabled: bool = False
     sync_interval_minutes: int = Field(default=60, gt=0)
     sync_lookback_days: int = Field(default=7, ge=1)
     max_sync_days: int = Field(default=31, ge=1, le=31)
     api_base_url: HttpUrl = HttpUrl("http://127.0.0.1:8000")
+
+    @field_validator("lead_ads_api_version")
+    @classmethod
+    def validate_lead_ads_version(cls, value: str | None) -> str | None:
+        if value is not None and re.fullmatch(r"v[0-9]+\.[0-9]+", value) is None:
+            raise ValueError("Lead Ads API version is invalid")
+        return value
+
+    @field_validator("lead_ads_allowed_page_ids", "lead_ads_authorized_sources")
+    @classmethod
+    def validate_lead_ads_ids(cls, value: list[str] | dict[str, str]):
+        ids = list(value) + (list(value.values()) if isinstance(value, dict) else [])
+        if any(re.fullmatch(r"[0-9]{1,64}", item) is None for item in ids):
+            raise ValueError("Lead Ads source IDs are invalid")
+        return value
+
+    @property
+    def lead_ads_ingress_ready(self) -> bool:
+        return bool(self.lead_ads_enabled and not self.demo_mode and self.lead_ads_allowed_page_ids and all(
+            value is not None and value.get_secret_value().strip()
+            for value in (self.lead_ads_app_secret, self.lead_ads_verify_token)
+        ))
+
+    @property
+    def lead_ads_graph_ready(self) -> bool:
+        return bool(self.lead_ads_enabled and self.lead_ads_api_version and
+                    self.lead_ads_access_token and self.lead_ads_access_token.get_secret_value().strip())
 
     @field_validator("app_timezone")
     @classmethod
@@ -93,6 +139,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_relationships(self) -> "Settings":
+        if self.lead_ads_retry_base_seconds > self.lead_ads_retry_max_seconds:
+            raise ValueError("Lead Ads retry policy is invalid")
+        if any(page not in self.lead_ads_allowed_page_ids for page in self.lead_ads_authorized_sources.values()):
+            raise ValueError("Lead Ads reconciliation sources must use allowed pages")
         if self.sync_lookback_days > self.max_sync_days:
             raise ValueError("SYNC_LOOKBACK_DAYS cannot exceed MAX_SYNC_DAYS")
         if self.resolved_database_url == self.resolved_demo_database_url:

@@ -37,6 +37,7 @@ class LeadResponse(CRMModel):
     city: str | None
     state: str | None
     meta_created_time: datetime | None
+    meta_page_id: str | None
     meta_campaign_id: str | None
     meta_campaign_name: str | None
     meta_adset_id: str | None
