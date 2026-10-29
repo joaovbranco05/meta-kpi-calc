@@ -8,6 +8,7 @@ from sqlalchemy import engine_from_config, pool
 from meta_kpi_calc.core.config import get_settings
 from meta_kpi_calc.db.base import Base
 from meta_kpi_calc.db import models  # noqa: F401  # Register model metadata.
+from meta_kpi_calc.crm import models as crm_models  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:
