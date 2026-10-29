@@ -4,7 +4,9 @@ Aplicação local para consolidar métricas de campanhas da Meta e calcular KPIs
 de investimento, leads e matrículas da RCTEC, FECAF Florianópolis e Curso com
 Bolsa.
 
-Esta entrega contém as etapas 0 a 9C: contrato do MVP, configuração,
+Esta entrega contém as etapas 0 a 9C de Analytics e a Fase1 do mini-CRM:
+modelagem e persistência de leads, importação local e API CRM de uso local.
+Inclui contrato do MVP, configuração,
 infraestrutura SQLite/Alembic, endpoint de saúde, modelos de domínio, dados
 fictícios, serviço interno de KPIs, cliente Meta mock-first e serviço interno de
 sincronização com agendamento opcional, além da API REST local para conexão,
@@ -13,11 +15,11 @@ Streamlit, hardening operacional, lançamento diário seguro e leitura orientada
 à decisão. Não há integração
 com BotConversa nesta entrega.
 
-## Prioridade atual — preparação do mini-CRM
+## Prioridade atual — mini-CRM local
 
-A Fase 0 de auditoria e preparação arquitetural foi validada em 28/10/2026.
-Analytics continua funcional e preservado; o pacote `crm/` contém apenas uma
-docstring. Não há captura de leads individuais, login ou interface comercial.
+A Fase 0 foi concluída e a Fase1 implementa leads individuais, histórico e
+ingestão por arquivo/API local. Analytics continua funcional e preservado. Não
+há login, interface comercial ou captura automática da Meta.
 
 - [Auditoria e inventário A/B/C/D](docs/TECHNICAL_AUDIT.md)
 - [Arquitetura atual e proposta modular](docs/ARCHITECTURE.md)
@@ -25,15 +27,53 @@ docstring. Não há captura de leads individuais, login ou interface comercial.
 - [Modelo e planejamento PostgreSQL](docs/CRM_DATA_MODEL.md)
 - [Integração futura Lead Ads](docs/META_LEAD_ADS_INTEGRATION.md)
 
-Próximo incremento recomendado: contrato mínimo de Lead/LeadActivity, migration
-aditiva e testes de idempotência em SQLite temporário. Não foi iniciado.
+### Contrato local da Fase1
+
+`Lead` representa uma submissão individual e usa `meta_lead_id` textual único;
+telefone/e-mail não são chaves únicas. Os campos observados da planilha são
+persistidos com seus IDs e snapshots. `lead_status` da Meta vira
+`source_status`; o status interno começa em `NEW` (`NEW`, `CONTACTED`,
+`INTERESTED`, `ENROLLED`, `NO_RESPONSE`, `LOST`). `course` fica vazio se não
+informado. Uma campanha local só é relacionada quando seu ID Meta já existe.
+Datetime sem offset é interpretado como UTC e telefone não recebe DDD inferido.
+
+`LeadActivity` registra importação automática, mudança de status e atividades
+do operador (`NOTE`, `CONTACT_ATTEMPTED`, `CONTACT_MADE`). A origem do ator é
+`SYSTEM_IMPORT` ou `LOCAL_OPERATOR`; `actor_id` permanece nulo enquanto não
+houver identidade real. Reimportar o mesmo ID preserva status, notas e histórico;
+campos de origem presentes podem ser corrigidos e a atividade guarda somente os
+nomes dos campos que mudaram.
+
+A migration `0005_crm_leads` é aditiva. Após `alembic upgrade head`, simule a
+importação com:
+
+```bash
+PYTHONPATH=src python -m meta_kpi_calc.crm.import_cli \
+  /caminho/para/exportacao-meta.xls \
+  --database-url sqlite:////caminho/absoluto/meta_kpi_demo.db
+```
+
+A CLI é dry-run por padrão; passe `--commit` para persistir. Aceita CSV UTF-8,
+XLSX sem fórmulas e SpreadsheetML 2003 com extensão `.xls`; XLS binário OLE,
+fórmulas, arquivos acima de 20 MiB e cabeçalhos extras são recusados. Imprime
+somente totais/códigos de erro. A API oferece `GET /api/crm/leads` (offset,
+limit, status, campaign_id e busca), detalhe, PATCH de status e leitura/criação
+de atividades. As cinco operações exigem conexão de loopback; isso não é
+autenticação e não autoriza publicação via proxy ou host remoto.
+
+As alterações detalhadas estão descritas em `docs/CRM_DATA_MODEL.md`,
+`docs/CRM_ROADMAP.md`, `docs/ARCHITECTURE.md`, `docs/STATUS.md` e
+`docs/OPERATIONS.md` na cópia local. A regra de exclusão local do Git impede que
+esses arquivos apareçam no diff desta sessão.
+
+Próximo incremento: integração Meta Lead Ads (Fase2), ainda sem webhook ou
+chamada real nesta entrega.
 `PLAN.md`, `PLAN-2.md` e `PRODUCT_REVIEW.md` permanecem históricos; a prioridade
 9D/matrícula individual foi subordinada ao roadmap CRM. O runbook local em
 `OPERATIONS.md` permanece aplicável, sem constituir plano de deploy remoto.
 
-Baseline e pós: 215 testes aprovados, dois avisos conhecidos. QA confirmou
-OpenAPI completo inalterado, import/startup demo e Alembic em banco temporário.
-Nenhuma conexão Meta real, PostgreSQL, deploy ou UI E2E foi validada.
+Validação e status desta Fase1 são registrados em `docs/STATUS.md`.
+Nenhuma conexão Meta real, PostgreSQL, deploy ou UI E2E foi feita.
 
 ## Requisitos
 
