@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     lead_ads_access_token: SecretStr | None = None
     lead_ads_app_secret: SecretStr | None = None
     lead_ads_verify_token: SecretStr | None = None
+    lead_ads_diagnostic_log_path: Path | None = None
     lead_ads_allowed_page_ids: list[str] = Field(default_factory=list)
     lead_ads_authorized_sources: dict[str, str] = Field(default_factory=dict)
     lead_ads_body_max_bytes: int = Field(default=262144, ge=1024, le=1048576)

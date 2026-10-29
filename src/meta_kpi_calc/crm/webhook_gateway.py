@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, Response
 
 from meta_kpi_calc.core.config import Settings
 from meta_kpi_calc.core.logging import configure_logging
+from meta_kpi_calc.crm.webhook_logging import WebhookDiagnosticMiddleware
 
 WEBHOOK_PATH = "/webhooks/meta/lead-ads"
 ALLOWED_METHODS = ("GET", "POST")
@@ -66,6 +67,11 @@ def create_webhook_gateway_app(
         lifespan=lifespan,
     )
     application.router.redirect_slashes = False
+    if app_settings.lead_ads_diagnostic_log_path is not None:
+        application.add_middleware(
+            WebhookDiagnosticMiddleware, path=app_settings.lead_ads_diagnostic_log_path,
+            webhook_only=False,
+        )
 
     @application.api_route(
         "/{path:path}",
