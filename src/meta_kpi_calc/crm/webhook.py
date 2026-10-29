@@ -40,7 +40,8 @@ def verify_webhook(request: Request) -> PlainTextResponse:
     return PlainTextResponse(challenge)
 
 
-def parse_events(payload: object, allowed_pages: list[str]) -> list[EventInput]:
+def parse_events(payload: object, allowed_pages: list[str],
+                 authorized_sources: dict[str, str]) -> list[EventInput]:
     if not isinstance(payload, dict) or payload.get("object") != "page":
         raise LeadAdsError("invalid_payload")
     entries = payload.get("entry")
@@ -66,7 +67,9 @@ def parse_events(payload: object, allowed_pages: list[str]) -> list[EventInput]:
             if value.get("page_id") is not None and meta_id(value["page_id"]) != page_id:
                 raise LeadAdsError("source_mismatch")
             lead = meta_id(value.get("leadgen_id"))
-            form = meta_id(value["form_id"]) if value.get("form_id") is not None else None
+            form = meta_id(value.get("form_id"))
+            if authorized_sources.get(form) != page_id:
+                raise LeadAdsError("source_not_allowed")
             ad = meta_id(value["ad_id"]) if value.get("ad_id") is not None else None
             result.append(EventInput(lead, page_id, form, ad))
     return result
@@ -94,9 +97,16 @@ async def receive_webhook(request: Request) -> dict[str, str]:
         reject(403, "invalid_signature")
     try:
         payload = json.loads(body)
-        events = parse_events(payload, settings.lead_ads_allowed_page_ids)
+        events = parse_events(
+            payload,
+            settings.lead_ads_allowed_page_ids,
+            settings.lead_ads_authorized_sources,
+        )
     except LeadAdsError as error:
-        reject(403 if error.code == "page_not_allowed" else 400, error.code)
+        reject(
+            403 if error.code in {"page_not_allowed", "source_not_allowed"} else 400,
+            error.code,
+        )
     except (ValueError, UnicodeError, RecursionError):
         reject(400, "invalid_payload")
     await run_in_threadpool(_persist, request.app.state.database.session_factory, events)

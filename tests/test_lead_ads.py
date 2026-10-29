@@ -81,6 +81,8 @@ def test_settings_are_independent_fail_closed_and_validate_sources():
         Settings(_env_file=None, lead_ads_authorized_sources={"20": "10"})
     with pytest.raises(ValueError):
         Settings(_env_file=None, lead_ads_api_version="https://untrusted.test")
+    assert options(settings).lead_ads_ingress_ready
+    assert not options(settings).model_copy(update={"lead_ads_authorized_sources": {}}).lead_ads_ingress_ready
 
 
 def test_webhook_handshake_disabled_valid_and_invalid(migrated_database):
@@ -140,6 +142,19 @@ def test_webhook_batch_atomic_validation(migrated_database, case, expected):
     if case == "unsupported": data["entry"][0]["changes"][0]["field"] = "feed"
     with TestClient(app) as client:
         assert client.post("/webhooks/meta/lead-ads", **signed(data)).status_code == expected
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count(WebhookEvent.id))) == 0
+
+
+def test_webhook_rejects_form_not_authorized_for_page(migrated_database):
+    settings, database = migrated_database
+    app = create_app(options(settings)); app.state.database = database
+    data = notification()
+    data["entry"][0]["changes"][0]["value"]["form_id"] = "99"
+    with TestClient(app) as client:
+        response = client.post("/webhooks/meta/lead-ads", **signed(data))
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "source_not_allowed"
     with database.session_factory() as session:
         assert session.scalar(select(func.count(WebhookEvent.id))) == 0
 
@@ -270,6 +285,23 @@ def test_worker_commits_claim_before_http_and_preserves_commercial_history(migra
         assert session.scalar(select(Lead.commercial_status)) == LeadStatus.CONTACTED
         assert session.scalar(select(func.count(LeadActivity.id))) == 2
         assert session.scalar(select(WebhookEvent.status)) == "COMPLETED"
+
+
+def test_worker_rejects_unmapped_form_before_graph_request(migrated_database):
+    settings, database = migrated_database; settings = options(settings)
+    with database.session_factory.begin() as session:
+        enqueue_events(session, [EventInput("30", "10", "99", "40")])
+        session.execute(update(WebhookEvent).values(next_attempt_at=NOW, received_at=NOW))
+
+    def must_not_call_graph(_request):
+        raise AssertionError("Unauthorized form must be rejected before Graph API")
+
+    result = process_events(database.session_factory, graph(must_not_call_graph), settings,
+                            max_events=1, clock=lambda: NOW)
+    assert result["claimed"] == 1 and result["failed_or_retry"] == 1
+    with database.session_factory() as session:
+        row = session.scalar(select(WebhookEvent))
+        assert row.status == "FAILED" and row.error_code == "source_not_allowed"
 
 
 def test_worker_two_claimers_have_one_winner(migrated_database):

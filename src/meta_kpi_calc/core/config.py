@@ -92,7 +92,8 @@ class Settings(BaseSettings):
 
     @property
     def lead_ads_ingress_ready(self) -> bool:
-        return bool(self.lead_ads_enabled and not self.demo_mode and self.lead_ads_allowed_page_ids and all(
+        return bool(self.lead_ads_enabled and not self.demo_mode and self.lead_ads_allowed_page_ids
+                    and self.lead_ads_authorized_sources and all(
             value is not None and value.get_secret_value().strip()
             for value in (self.lead_ads_app_secret, self.lead_ads_verify_token)
         ))

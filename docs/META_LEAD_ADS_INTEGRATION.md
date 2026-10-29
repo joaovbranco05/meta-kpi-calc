@@ -181,6 +181,40 @@ propagation desativada. **Logs de proxy externo ainda exigem redação/desativa�
 antes de exposição.** Não expor Analytics/CRM privado por proxy apenas para publicar o
 webhook. Login/auth continuam fora desta fase.
 
+## Fase 2B.3 — gateway local preparado; gate externo pendente
+
+`meta_kpi_calc.crm.webhook_gateway:app` é um app ASGI independente para ser o
+alvo local de um futuro túnel. A allowlist é literal: `GET` e `POST` apenas em
+`/webhooks/meta/lead-ads`, comparando também o path bruto. Qualquer outro path
+retorna 404; outros métodos no callback retornam 405 com `Allow: GET, POST`.
+Não há docs, OpenAPI, health, redirecionamento de barra, static files ou
+roteamento para CRM/Analytics. Upstream HTTP só pode ser IP loopback e é
+default `127.0.0.1:8000`; redirecionamentos ficam desabilitados. Body usa o
+limite configurado, headers encaminhados são mínimos e erros de upstream são
+sanitizados. O app é independente para o operador poder apontar o túnel à porta
+8765 sem expor diretamente Uvicorn principal na porta 8000.
+
+Testes com HTTPX MockTransport cobrem callback GET/POST, paths privados e
+alternativos, métodos, path com barra final, body acima do limite, filtragem de
+headers, transporte indisponível e rejeição de upstream não-loopback. A inbox e
+worker também passaram a conferir mapping formulário→Página; evento sem essa
+associação é rejeitado no webhook e, para evento legado/enfileirado, o worker
+marca origem não autorizada antes de qualquer GET Graph.
+
+Isto prova somente o comportamento local do gateway e os controles em testes.
+**Não foi iniciado túnel HTTPS, teste em fronteira pública, handshake com Meta,
+inscrição de app/Página, lead novo ou worker real.** Não há provedor de túnel
+selecionado; certificado TLS, logs da borda, URL pública e isolamento HTTPS ainda
+não foram verificados. Cada passo operacional espera configuração local e
+autorização explícita do operador.
+
+Na auditoria de 29/10/2026: `.env` tinha somente o token Lead Ads presente entre
+as credenciais Lead Ads. `LEAD_ADS_ENABLED=false`, App Secret, Verify Token,
+versão da API, allowlist e mapping formulário→Página ainda não estavam
+configurados. Portanto handshake/ingress e cliente Graph estão fail-closed.
+O banco confirmado tinha revisão 0006, integridade `ok`, 1 lead e 1 atividade,
+com inbox vazia; esta preparação local não gravou nesse banco.
+
 ## Gate 2B — checklist para ação posterior
 
 1. No Meta for Developers, confirmar app e versão Graph suportada; verificar

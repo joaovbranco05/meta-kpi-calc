@@ -20,9 +20,11 @@ com BotConversa nesta entrega.
 ## Prioridade atual — mini-CRM local
 
 A Fase 0 e a fundação local Fase 1 estão preservadas. Fase 2A acrescenta cliente
-Graph, webhook assinado, inbox e recuperação manual; integração real 2B segue
-pendente. Analytics permanece funcional. Não há login, interface comercial,
-PostgreSQL ou deploy. Não exponha a API privada para publicar o webhook.
+Graph, webhook assinado, inbox e recuperação manual; a preparação local da
+Fase 2B.3 acrescenta um gateway webhook-only, ainda sem túnel nem configuração
+Meta. Integração real ponta a ponta segue pendente. Analytics permanece
+funcional. Não há login, interface comercial, PostgreSQL ou deploy. Não exponha
+a API privada para publicar o webhook.
 
 - [Auditoria e inventário A/B/C/D](docs/TECHNICAL_AUDIT.md)
 - [Arquitetura atual e proposta modular](docs/ARCHITECTURE.md)
@@ -186,6 +188,19 @@ DEMO_MODE=false \
 
 O estado e as evidências da execução real (ou o motivo de ela não ter ocorrido)
 estão em `docs/STATUS.md`. Webhook e reconciliação continuam fora deste teste.
+
+### Fase 2B.3 — preparação local do webhook
+
+`meta_kpi_calc.crm.webhook_gateway:app` é um alvo local isolado para eventual
+túnel: só encaminha o path exato `/webhooks/meta/lead-ads` com GET/POST para a
+API em `127.0.0.1:8000`; bloqueia os demais paths/métodos, limita o corpo e não
+repassa cookies, autorização ou cabeçalhos de encaminhamento. Não tem docs,
+OpenAPI ou health endpoint. Testes usam upstream mockado. **Túnel público,
+painel Meta, geração de lead e worker real ainda não foram iniciados.** O `.env`
+atual não está pronto para ingress: faltam App Secret, Verify Token, allowlist,
+mapping form→Página, versão Lead Ads explícita e habilitação. Configure-os
+localmente; nunca compartilhe segredos no chat. Consulte
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md) e [`docs/STATUS.md`](docs/STATUS.md).
 
 ## Requisitos
 

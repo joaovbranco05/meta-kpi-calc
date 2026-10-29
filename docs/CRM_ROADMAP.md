@@ -13,6 +13,7 @@ individual não são pré-requisitos automáticos deste roadmap.
 | 2A — integração técnica local (concluída) | Fase1 verificada e contratos mínimos fundamentados em fontes Meta-owned | Cliente GET, webhook assinado, inbox/worker retomável, normalizador, reconciliação/checkpoint e CLI | 283 testes aprovados com mocks e TCP bloqueado; nenhum Graph real/deploy/auth/PostgreSQL |
 | 2B — integração real controlada (webhook/validação operacional pendentes) | Gates específicos; confirmar documentação atual, versão, permissões, tokens e fontes | App/Página de teste, HTTPS webhook-only, lead fictício e validação operacional | Busca direta 2B.2 concluída; webhook e integração real ponta a ponta continuam pendentes |
 | 2B.2 — busca direta de uma lead (concluída) | Token Lead Ads válido, mapping form→Página, banco identificado e backup verificado | `fetch-lead` por ID; normalização; associação autorizada; ingestão/histórico idempotentes | Após duas respostas iniciais 401, dois GETs receberam 200: um criou uma lead + atividade IMPORTED e o replay não duplicou. 294 testes aprovados |
+| 2B.3 — preparação local de webhook (código e testes locais concluídos; operação pendente) | Gate 2B.2; mapping form→Página; segredos locais; autorização separada para túnel, painel Meta, lead fictício e worker | Gateway webhook-only local; validação HMAC/inbox existente; teste controlado e operação documentada | Gateway só encaminha GET/POST no path exato e foi testado com mocks. Config atual incompleta; sem túnel, alteração Meta, lead novo ou processamento real |
 | 3 — interface mini-CRM e identidade | Fases1/2 estabilizadas para ingestão automática; contrato identidade e papéis | Login/sessões, autorização servidor, lista/detalhe/filtros, status/notas/histórico e novos/não atendidos | Operadora executa jornada sem IDs técnicos; acesso negado/expirado/revogado e CSRF testados; endpoints legados e CRM protegidos antes de exposição remota; filtros curso/campanha/data/status e atualização concorrente sem perda; Analytics preservado |
 | 4 — deploy e validação operacional | Fases1–3 aprovadas; autorização para migração/deploy/dados reais, política de acesso/retenção | PostgreSQL cloud (Supabase candidato), adaptação por dialeto, TLS/segredos, backup/restore, monitoramento e runbook | Cadeia Alembic e import ensaiados, PK/FK/somas/UTC reconciliados, rollback demonstrável, restore realizado, webhook HTTPS e recuperação monitorados, piloto autorizado com dado controlado e acesso mínimo; sem multiworker com lock local como garantia |
 | 5 — Data Analytics | Dados operacionais confiáveis, reconciliação e definições de atribuição/coorte | Consultas SQL, modelo analítico, BI (Tableau/Power BI candidatos), evolução KPI | Fonte/dicionário explícitos; números reconciliam com CRM e agregados legados sem dupla contagem; unknown distinto de zero; nenhum KPI alterado silenciosamente |
@@ -25,13 +26,15 @@ O schema poderá ser ensaiado no dialeto alvo antes de cutover, em tarefa própr
 Uma etapa não é concluída só por documento ou código de saída: persistência,
 reprocessamento e comportamento observável precisam ser verificados.
 
-## Próxima ação recomendada — completar o teste direto 2B.2
+## Próxima ação recomendada — avançar os gates operacionais 2B.3
 
 O teste direto 2B.2 está concluído: a lead fictícia foi persistida e a segunda
-execução foi idempotente, com banco íntegro e apenas uma atividade IMPORTED.
-Próxima etapa, separada: preparar HTTPS webhook-only, validar HMAC e processar
-pela inbox/worker. Não publicar API CRM, executar reconciliação ou enviar tokens
-pelo chat.
+execução foi idempotente. A preparação local 2B.3 implementa o gateway e
+regressões; no estado conferido, faltam App Secret, Verify Token, versão da API,
+allowlist e mapping form→Página. Depois de configurar esses valores localmente,
+abra um gate com autorização explícita antes de usar túnel, alterar o app/página
+Meta, criar lead fictício ou rodar o worker. Não publique API CRM, execute
+reconciliação ou envie tokens pelo chat.
 
 ## Decisões a fechar na fase apropriada
 
@@ -59,7 +62,8 @@ worker com lease/retry, normalizador e reconciliação/checkpoint usando ingest_
 Validação final e revisões constam em STATUS/README após gates.
 
 No fechamento da 2A, Gate 2B ainda estava pendente e não havia autorização
-automática para rede, túnel, deploy ou dados reais. A tentativa restrita 2B.2
-posterior consta no status vigente: GET direto recebeu 401 e não gravou. Webhook
-HTTPS-only, validação HMAC operacional, reconciliação e deploy continuam
-pendentes. Fase 3 auth/UI e fase 4 PostgreSQL continuam futuras.
+automática para rede, túnel, deploy ou dados reais. O teste direto 2B.2 posterior
+consta no status vigente: GET direto criou a lead fictícia e replay não duplicou.
+Webhook HTTPS-only operacional, configuração Meta, geração de lead de webhook,
+reconciliação e deploy continuam pendentes. Fase 3 auth/UI e fase 4 PostgreSQL
+continuam futuras.

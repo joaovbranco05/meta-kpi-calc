@@ -1,6 +1,49 @@
 # Status do projeto
 
-## Prioridade vigente — Fase 2B.2, busca direta controlada (29/10/2026)
+## Prioridade vigente — Fase 2B.3, preparação local (29/10/2026)
+
+Implementada uma fronteira local separada para eventual túnel e validação
+formulário→Página antes de aceitar evento ou consultar Graph. O gateway só
+encaminha GET/POST no path exato `/webhooks/meta/lead-ads`, bloqueia outros
+paths/métodos, limita body, não repassa credenciais/cookies/forwarding headers,
+e não tem docs/health/OpenAPI. A API principal continua privada. Nenhum túnel,
+painel Meta, lead novo, webhook real ou worker real foi iniciado.
+
+### Preflight sem segredos
+
+- Branch `jota/mini_crm`, base `199dd36`; árvore limpa antes desta alteração.
+- Banco confirmado `data/meta_kpi.db`, Alembic `0006_lead_ads_inbox`,
+  `PRAGMA quick_check=ok`; 1 lead e 1 atividade existentes, inbox vazia e sem
+  estado de reconciliação. Nenhum dado pessoal foi exibido.
+- Configuração local: `DEMO_MODE=false`; token Lead Ads presente; Lead Ads
+  desabilitado; App Secret e Verify Token ausentes; allowlist e mapping
+  formulário→Página vazios; versão Lead Ads não configurada. Portanto, tanto
+  `lead_ads_ingress_ready` quanto `lead_ads_graph_ready` são falsos.
+- Nenhum comando alterou o banco real, então não houve operação de escrita nem
+  backup nesta implementação. Testes seguintes usam bancos temporários e mocks.
+
+### Validação local
+
+Testes de gateway mockado cobrem allowlist exata, GET/POST, métodos e paths
+negados, limite de body, filtragem de headers, upstream indisponível e rejeição
+de upstream não-loopback. Regressões cobrem formulário sem autorização antes de
+enfileirar e antes de qualquer chamada Graph. `.venv/bin/python -m pytest -q`:
+**319 passed, 2 avisos conhecidos**, com TCP real bloqueado pelos testes.
+`compileall` e `git diff --check` também passaram. Nenhuma evidência de túnel ou
+Meta real foi produzida nesta etapa.
+
+### Ponto de parada operacional
+
+Para avançar, primeiro configure localmente App Secret, Verify Token, versão da
+API, allowlist da Página e mapping do formulário, além de habilitar Lead Ads;
+não compartilhe valores secretos no chat. Depois desta preparação local, o
+próximo gate exige autorização explícita para abrir um túnel HTTPS apontado
+somente à porta local 8765. Alterar o app/página Meta, gerar novo lead de teste
+e executar o worker são gates separados, cada um aguardando autorização do
+operador. Documentação oficial atual da Meta segue sem confirmação independente
+onde developers.facebook.com respondeu 429.
+
+## Evidência anterior — Fase 2B.2, busca direta controlada (29/10/2026)
 
 Implementado `fetch-lead` na CLI existente. O comando exige `--allow-network` e
 um `--lead-id`; chama somente `GET /{lead-id}`, exige `form_id` mapeado a Página

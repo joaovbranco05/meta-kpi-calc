@@ -57,7 +57,13 @@ def process_events(factory, client: MetaLeadAdsClient, settings: Settings, *,
             break
         counts["claimed"] += 1
         try:
-            if claim.event.page_id not in settings.lead_ads_allowed_page_ids:
+            source_is_allowed = (
+                claim.event.page_id in settings.lead_ads_allowed_page_ids
+                and claim.event.form_id is not None
+                and settings.lead_ads_authorized_sources.get(claim.event.form_id)
+                == claim.event.page_id
+            )
+            if not source_is_allowed:
                 raise LeadAdsError("source_not_allowed")
             payload = client.get_lead(claim.event.lead_id)
             normalized = normalize_lead(payload, page_id=claim.event.page_id,
