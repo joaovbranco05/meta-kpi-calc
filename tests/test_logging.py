@@ -2,9 +2,10 @@ import io
 import logging
 
 from pydantic import SecretStr
+from uvicorn.logging import AccessFormatter
 
 from meta_kpi_calc.core.config import Settings
-from meta_kpi_calc.core.logging import REDACTED, configure_logging, redact_data
+from meta_kpi_calc.core.logging import REDACTED, RedactingFilter, configure_logging, redact_data
 
 
 def test_redact_data_handles_nested_sensitive_values() -> None:
@@ -97,3 +98,27 @@ def test_preexisting_handler_cannot_leak_token_from_traceback(tmp_path) -> None:
 
     assert sentinel not in stream.getvalue()
     assert REDACTED in stream.getvalue()
+
+
+def test_uvicorn_access_filter_preserves_formatter_arguments_and_redacts_secrets() -> None:
+    secrets = ("synthetic-verify", "synthetic-app-secret", "synthetic-page-token")
+    path = (
+        "/webhooks/meta/lead-ads?hub.verify_token=synthetic-verify"
+        "&app_secret=synthetic-app-secret&access_token=synthetic-page-token"
+    )
+    record = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        __file__,
+        1,
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:12345", "GET", path, "1.1", 200),
+        None,
+    )
+
+    assert RedactingFilter(secrets).filter(record)
+    formatted = AccessFormatter().format(record)
+
+    assert len(record.args) == 5
+    assert all(secret not in formatted for secret in secrets)
+    assert REDACTED in formatted

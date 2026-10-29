@@ -72,6 +72,18 @@ class RedactingFilter(logging.Filter):
         self._secrets = tuple(secrets)
 
     def filter(self, record: logging.LogRecord) -> bool:
+        # Uvicorn's AccessFormatter consumes five structured arguments instead
+        # of the already-rendered message. Preserve that shape while sanitizing
+        # the path field, or its formatter raises when args is cleared below.
+        if record.name == "uvicorn.access" and isinstance(record.args, tuple) and len(record.args) == 5:
+            client, method, path, http_version, status = record.args
+            record.args = (
+                *(redact_text(value, self._secrets) if isinstance(value, str) else value
+                  for value in (client, method, path, http_version, status)),
+            )
+            record.msg = redact_text(str(record.msg), self._secrets)
+            return True
+
         # Render once before redaction. Redacting the format template itself can
         # remove a ``%s`` placeholder and leave logging with unmatched args.
         record.msg = redact_text(record.getMessage(), self._secrets)
