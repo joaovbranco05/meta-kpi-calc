@@ -5,8 +5,9 @@ de investimento, leads e matrículas da RCTEC, FECAF Florianópolis e Curso com
 Bolsa.
 
 Esta entrega contém Analytics até 9C, a Fase 1 do mini-CRM local e a
-implementação técnica Lead Ads 2A, validada apenas com mocks. A integração real
-2B não foi executada. Modelagem de leads, importação e API CRM são preservadas.
+implementação técnica Lead Ads 2A, validada apenas com mocks. A integração 2B
+completa segue pendente; o teste direto 2B.2 persistiu uma lead fictícia e
+confirmou o replay idempotente. Modelagem de leads, importação e API CRM são preservadas.
 Inclui contrato do MVP, configuração,
 infraestrutura SQLite/Alembic, endpoint de saúde, modelos de domínio, dados
 fictícios, serviço interno de KPIs, cliente Meta mock-first e serviço interno de
@@ -142,25 +143,49 @@ foram fundamentados em [solução Meta-owned](https://github.com/facebookincubat
 e [exemplo oficial HMAC](https://github.com/fbsamples/whatsapp-api-examples/blob/main/signature-validation-with-webhooks-payloads/app.py).
 Isso não confirma suporte atual de versão/permissões/token ou retenção.
 
-### Gate 2B — próximos passos, sem execução autorizada
+### Gate 2B — próxima etapa: webhook `leadgen`
 
-1. No Meta for Developers, confirmar app, versão Graph atual e permissões para
-   leads/Páginas; conferir acesso da empresa e da pessoa responsável à Página.
-2. Escolher Página e formulário de teste e conferir os campos essenciais.
-   Token Insights não é automaticamente token Lead Ads.
-3. Configurar os três segredos no ambiente/secret manager, nunca no chat/Git;
-   verificar expiração, revogação e procedimento de renovação atual.
-4. Aprovar HTTPS somente para webhook, proteger API privada e logs. Não houve
-   túnel/deploy; qualquer exposição depende de autorização própria.
-5. Configurar callback e verify token no painel Meta; completar verificação e
-   inscrever Página no evento leadgen conforme documentação vigente.
-6. Criar lead fictício pela ferramenta oficial; conferir inbox, executar worker
-   explicitamente e verificar Lead/histórico. Reenviar para provar idempotência.
-7. Ensaiar falha/reinício/reconciliação e conferir contagens; aprovar política
-   RCTEC de acesso, retenção e campos personalizados antes de dados reais.
+O acesso direto funcionou após duas respostas iniciais 401. A primeira resposta
+200 criou somente a lead pedida e a segunda confirmou `already_existed`, sem
+nova atividade ou aumento de contagem. A evidência detalhada está em
+`docs/STATUS.md`. Em etapa própria, preparar HTTPS temporário restrito ao path
+`/webhooks/meta/lead-ads`, validar HMAC e processar pela inbox/worker explícito.
+Não publicar a API CRM completa. Reconciliação, deploy e dados não fictícios
+continuam fora do escopo e exigem validação e autorização próprias.
 
 Os detalhes de arquitetura, status, roadmap e operação estão versionados em
 `docs/`. Não houve commit, push ou merge durante a 2A.
+
+### Fase 2B.2 — busca direta de uma lead
+
+A CLI oferece `fetch-lead`, uma chamada Graph de objeto por execução. Ela exige
+`--allow-network` e `--lead-id`, consulta somente `GET /{lead-id}`, confere o
+`form_id` retornado no mapping `LEAD_ADS_AUTHORIZED_SOURCES`, valida a Página
+associada e então usa o normalizador e `ingest_lead()`. O resultado não inclui
+campos pessoais; informa criação/reimportação, histórico e diferença agregada
+na contagem de leads. Não percorre o formulário nem chama reconciliação.
+
+Use um token Lead Ads recém-rotacionado em `.env`/secret manager, configure a
+versão explícita e a relação formulário→Página autorizada. Antes de cada
+execução que possa gravar, faça backup consistente do SQLite e confirme o
+caminho mostrado pela CLI. Em 29/10/2026, após duas respostas 401, o GET
+retornou 200, persistiu uma lead e uma atividade `IMPORTED`; a repetição
+retornou `already_existed` sem nova atividade. Nenhum outro lead foi importado.
+Os backups estão registrados em `docs/STATUS.md`. Exemplo:
+
+```bash
+LEAD_ADS_ENABLED=true \
+LEAD_ADS_API_VERSION=v26.0 \
+LEAD_ADS_ALLOWED_PAGE_IDS='["100130844916605"]' \
+LEAD_ADS_AUTHORIZED_SOURCES='{"3207253009465556":"100130844916605"}' \
+DEMO_MODE=false \
+.venv/bin/python -m meta_kpi_calc.crm.lead_ads_cli \
+  --database-url 'sqlite:///./data/meta_kpi.db' \
+  --allow-network --lead-id '1799753681047061' fetch-lead
+```
+
+O estado e as evidências da execução real (ou o motivo de ela não ter ocorrido)
+estão em `docs/STATUS.md`. Webhook e reconciliação continuam fora deste teste.
 
 ## Requisitos
 

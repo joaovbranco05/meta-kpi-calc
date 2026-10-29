@@ -11,7 +11,8 @@ individual não são pré-requisitos automáticos deste roadmap.
 | 0 — auditoria e preparação | Baseline e branch de trabalho | Inventário A/B/C/D, arquitetura, modelo proposto, plano Lead Ads, scaffold docstring | Concluída; suíte original e 18 operações preservadas antes da Fase1 |
 | 1 — modelagem e persistência de leads (concluída localmente) | Fase 0 aprovada; catálogo mínimo de status/campos e identidade do ator definidos | Modelos Lead/LeadActivity, migration aditiva, ingestão idempotente, importador local e API REST mínima | Fundação verificada no baseline228 antes de2A: replay/concorrência, status/histórico, campanha opcional, import e migration; sem auth/UI/deploy/PostgreSQL |
 | 2A — integração técnica local (concluída) | Fase1 verificada e contratos mínimos fundamentados em fontes Meta-owned | Cliente GET, webhook assinado, inbox/worker retomável, normalizador, reconciliação/checkpoint e CLI | 283 testes aprovados com mocks e TCP bloqueado; nenhum Graph real/deploy/auth/PostgreSQL |
-| 2B — integração real controlada (não executada) | Gate 2B: autorização específica e confirmação da documentação atual, versão, permissões, tokens e fontes antes de qualquer chamada real | App/Página de teste, HTTPS webhook-only, lead fictício e validação operacional | Lead persistido, replay/reconciliação conferidos, segurança e acesso aprovados; não autorizado automaticamente por 2A |
+| 2B — integração real controlada (webhook/validação operacional pendentes) | Gates específicos; confirmar documentação atual, versão, permissões, tokens e fontes | App/Página de teste, HTTPS webhook-only, lead fictício e validação operacional | Busca direta 2B.2 concluída; webhook e integração real ponta a ponta continuam pendentes |
+| 2B.2 — busca direta de uma lead (concluída) | Token Lead Ads válido, mapping form→Página, banco identificado e backup verificado | `fetch-lead` por ID; normalização; associação autorizada; ingestão/histórico idempotentes | Após duas respostas iniciais 401, dois GETs receberam 200: um criou uma lead + atividade IMPORTED e o replay não duplicou. 294 testes aprovados |
 | 3 — interface mini-CRM e identidade | Fases1/2 estabilizadas para ingestão automática; contrato identidade e papéis | Login/sessões, autorização servidor, lista/detalhe/filtros, status/notas/histórico e novos/não atendidos | Operadora executa jornada sem IDs técnicos; acesso negado/expirado/revogado e CSRF testados; endpoints legados e CRM protegidos antes de exposição remota; filtros curso/campanha/data/status e atualização concorrente sem perda; Analytics preservado |
 | 4 — deploy e validação operacional | Fases1–3 aprovadas; autorização para migração/deploy/dados reais, política de acesso/retenção | PostgreSQL cloud (Supabase candidato), adaptação por dialeto, TLS/segredos, backup/restore, monitoramento e runbook | Cadeia Alembic e import ensaiados, PK/FK/somas/UTC reconciliados, rollback demonstrável, restore realizado, webhook HTTPS e recuperação monitorados, piloto autorizado com dado controlado e acesso mínimo; sem multiworker com lock local como garantia |
 | 5 — Data Analytics | Dados operacionais confiáveis, reconciliação e definições de atribuição/coorte | Consultas SQL, modelo analítico, BI (Tableau/Power BI candidatos), evolução KPI | Fonte/dicionário explícitos; números reconciliam com CRM e agregados legados sem dupla contagem; unknown distinto de zero; nenhum KPI alterado silenciosamente |
@@ -24,14 +25,13 @@ O schema poderá ser ensaiado no dialeto alvo antes de cutover, em tarefa própr
 Uma etapa não é concluída só por documento ou código de saída: persistência,
 reprocessamento e comportamento observável precisam ser verificados.
 
-## Próxima ação recomendada — Gate 2B futuro
+## Próxima ação recomendada — completar o teste direto 2B.2
 
-Gate 2A local foi implementado e sua suíte final passou 283 testes, dois avisos conhecidos.
-Não iniciar Fase 3 ou conexão real automaticamente. Antes do 2B obter autorização
-para app/Página/formulário de teste, confirmar versão/permissões e token,
-publicação HTTPS webhook-only, logs seguros e acesso privado. Executar checklist
-com lead fictício, replay, falha/reinício e reconciliação, conforme README e
-documento de integração. Não enviar tokens pelo chat.
+O teste direto 2B.2 está concluído: a lead fictícia foi persistida e a segunda
+execução foi idempotente, com banco íntegro e apenas uma atividade IMPORTED.
+Próxima etapa, separada: preparar HTTPS webhook-only, validar HMAC e processar
+pela inbox/worker. Não publicar API CRM, executar reconciliação ou enviar tokens
+pelo chat.
 
 ## Decisões a fechar na fase apropriada
 
@@ -58,8 +58,8 @@ implementa infraestrutura técnica local: cliente GET, HMAC, inbox durável,
 worker com lease/retry, normalizador e reconciliação/checkpoint usando ingest_lead.
 Validação final e revisões constam em STATUS/README após gates.
 
-Gate 2B permanece NÃO EXECUTADO: confirmar versão/permissões/token, configurar
-app/Página/formulário, publicar HTTPS webhook-only com proteção privada, gerar
-lead fictício e validar replay/reconciliação. Sem autorização automática para
-rede, túnel, deploy ou dados reais. O checklist prático está no documento de
-integração. Fase 3 auth/UI e fase 4 PostgreSQL continuam futuras.
+No fechamento da 2A, Gate 2B ainda estava pendente e não havia autorização
+automática para rede, túnel, deploy ou dados reais. A tentativa restrita 2B.2
+posterior consta no status vigente: GET direto recebeu 401 e não gravou. Webhook
+HTTPS-only, validação HMAC operacional, reconciliação e deploy continuam
+pendentes. Fase 3 auth/UI e fase 4 PostgreSQL continuam futuras.

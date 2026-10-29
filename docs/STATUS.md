@@ -1,6 +1,59 @@
 # Status do projeto
 
-## Prioridade vigente — Gate 2A Lead Ads local (29/10/2026)
+## Prioridade vigente — Fase 2B.2, busca direta controlada (29/10/2026)
+
+Implementado `fetch-lead` na CLI existente. O comando exige `--allow-network` e
+um `--lead-id`; chama somente `GET /{lead-id}`, exige `form_id` mapeado a Página
+allowlisted, normaliza os campos conhecidos e persiste por `ingest_lead()`. O
+resumo não imprime PII, a transação preserva status comercial e replay idêntico
+não cria atividade espúria. O fluxo não lista leads do formulário nem inicia
+reconciliação, webhook ou worker.
+
+### Tentativa real
+
+- Autorização explícita recebida para a lead fictícia `1799753681047061`, com
+  uso da credencial Lead Ads nova configurada localmente. Nenhum segredo foi
+  impresso ou alterado.
+- As duas primeiras tentativas receberam **HTTP 401 Unauthorized**. Após a
+  atualização local do `.env`, foram feitas mais duas chamadas, sempre apenas
+  `GET /v26.0/1799753681047061`; ambas receberam **HTTP 200 OK**. O token não foi
+  impresso nem alterado pelo agente.
+- Primeira resposta 200: `created`, `history_created=true`, `activity_type=IMPORTED`,
+  `unmapped_fields=0`, delta de leads `+1`. Segunda resposta 200: `already_existed`,
+  `history_created=false`, `activity_type=null`, delta `0`.
+- Banco confirmado: `data/meta_kpi.db`, revisão Alembic `0006_lead_ads_inbox`.
+  Após replay: integrity `ok`, 1 lead total, alvo presente, os cinco campos
+  conhecidos preenchidos, associação com formulário/Página conferida, status
+  comercial `NEW` e exatamente uma atividade `IMPORTED`. Assim, só o ID pedido
+  foi importado; nenhum outro lead foi consultado ou persistido.
+- Backups consistentes via SQLite Backup API foram verificados antes de cada
+  execução: `data/meta_kpi.before-fetch-lead-20261029T134314.db`,
+  `data/meta_kpi.before-fetch-lead-retry-20261029T134849.db`,
+  `data/meta_kpi.before-fetch-lead-retry2-20261029T135040.db` e
+  `data/meta_kpi.before-fetch-lead-replay-20261029T135101.db` (237568 bytes cada,
+  revisão 0006, quick_check `ok`).
+- Configuração não secreta da tentativa foi passada somente ao processo:
+  `LEAD_ADS_ENABLED=true`, `LEAD_ADS_API_VERSION=v26.0`, allowlist da Página e
+  mapping formulário→Página. O token não foi lido/imprimido no terminal.
+
+### Validação automatizada
+
+`.venv/bin/python -m pytest -q` — **294 testes aprovados, 2 avisos conhecidos**;
+testes com mock cobrem criação, cinco campos, autorização do form/Página,
+401/403, 404, resposta malformada, falha de commit com rollback e reimportação
+idempotente preservando status comercial. TCP real bloqueado na suíte.
+`git diff --check` passou. A execução real teve duas respostas 401 e, após a
+atualização local da credencial, duas respostas 200 (criação e replay idempotente).
+
+### Próximo passo
+
+O teste direto foi concluído, incluindo replay idempotente. Próxima etapa, em
+trabalho separado: preparar configuração `leadgen` com HTTPS temporário limitado
+ao path do webhook, HMAC e worker/inbox explícito. Webhook, túnel,
+reconciliação e deploy ainda não foram configurados nem executados; nunca expor
+endpoints privados do CRM.
+
+## Snapshot da entrega da Fase 2A (29/10/2026)
 
 Estado: implementação técnica local concluída e validada com mocks/bancos
 SQLite temporários. Gate 2B real NÃO EXECUTADO e sem autorização automática.
@@ -62,8 +115,8 @@ META_LEAD_ADS_INTEGRATION e README: versão/app/permissões, Página/formulário
 teste, segredos no ambiente, HTTPS webhook-only e validação de lead fictício,
 replay/reconciliação/segurança. Não executar isso implicitamente.
 
-`docs/` está ignorado por `.git/info/exclude`, preservado. Esta cópia local foi
-atualizada como solicitado; README rastreável mantém resumo/runbook/evidências.
+`docs/` foi incluído no controle de versão no commit `a9759b6`; esse commit
+registra a conclusão da Fase 2A antes da tentativa real descrita acima.
 As seções seguintes registram evolução histórica; seus textos de “próximo
 passo” não substituem a prioridade vigente.
 

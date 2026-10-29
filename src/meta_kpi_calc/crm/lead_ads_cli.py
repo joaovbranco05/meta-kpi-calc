@@ -15,7 +15,7 @@ from meta_kpi_calc.core.logging import configure_logging
 from meta_kpi_calc.crm.inbox import utcnow
 from meta_kpi_calc.crm.inbox_models import ReconciliationState, WebhookEvent
 from meta_kpi_calc.crm.lead_ads_client import LeadAdsError, MetaLeadAdsClient
-from meta_kpi_calc.crm.processing import process_events
+from meta_kpi_calc.crm.processing import fetch_single_lead, process_events
 from meta_kpi_calc.crm.reconciliation import reconcile_form
 from meta_kpi_calc.db.session import Database
 
@@ -35,10 +35,11 @@ def _summary(factory) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Local Lead Ads technical commands; network requires explicit opt-in.")
-    parser.add_argument("command", choices=("status", "process", "reconcile"))
+    parser.add_argument("command", choices=("status", "process", "reconcile", "fetch-lead"))
     parser.add_argument("--database-url", required=True)
     parser.add_argument("--allow-network", action="store_true")
     parser.add_argument("--max-events", type=int, default=100)
+    parser.add_argument("--lead-id", help="Single lead ID required by fetch-lead.")
     parser.add_argument("--form-id")
     parser.add_argument("--start", help="UTC/offset ISO timestamp; required for first reconciliation.")
     parser.add_argument("--end", help="UTC/offset ISO timestamp; defaults to captured start of scan.")
@@ -71,12 +72,16 @@ def main(argv: list[str] | None = None) -> int:
                                           max_pages=settings.lead_ads_max_pages, page_size=settings.lead_ads_page_size)
                 if args.command == "process":
                     result = process_events(database.session_factory, client, settings, max_events=args.max_events)
-                else:
+                elif args.command == "reconcile":
                     if not args.form_id:
                         raise LeadAdsError("source_not_allowed")
                     result = reconcile_form(database.session_factory, client, settings, form_id=args.form_id,
                                             start=datetime.fromisoformat(args.start.replace("Z", "+00:00")) if args.start else None,
                                             end=datetime.fromisoformat(args.end.replace("Z", "+00:00")) if args.end else None)
+                else:
+                    if not args.lead_id:
+                        raise LeadAdsError("lead_id_required")
+                    result = fetch_single_lead(database.session_factory, client, settings, lead_id=args.lead_id)
         print(json.dumps(result, sort_keys=True))
         return 0
     except LeadAdsError as error:

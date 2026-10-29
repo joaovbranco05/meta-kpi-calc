@@ -14,6 +14,8 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import event, func, select, update
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+from pydantic import SecretStr
 from starlette.requests import Request
 
 from meta_kpi_calc.api.app import create_app
@@ -26,7 +28,7 @@ from meta_kpi_calc.crm.lead_ads_cli import main as cli_main
 from meta_kpi_calc.crm.lead_ads_client import LeadAdsError, MetaLeadAdsClient
 from meta_kpi_calc.crm.models import Lead, LeadActivity, LeadStatus
 from meta_kpi_calc.crm.normalizer import normalize_lead
-from meta_kpi_calc.crm.processing import process_events
+from meta_kpi_calc.crm.processing import fetch_single_lead, process_events
 from meta_kpi_calc.crm.reconciliation import reconcile_form
 from meta_kpi_calc.crm.webhook import receive_webhook
 
@@ -585,3 +587,156 @@ def test_cli_status_aggregates_attempts_and_reconciliation_results(migrated_data
     summary = json.loads(capsys.readouterr().out)
     assert summary["attempts_total"] == 3 and summary["reconciliation_results"] == {"FAILED": 1}
     assert "meta_page_id" not in str(summary) and "meta_form_id" not in str(summary)
+
+
+def lead_ads_payload(lead_id="30", form_id="20"):
+    return {
+        "id": lead_id,
+        "created_time": "2026-10-29T11:00:00+00:00",
+        "form_id": form_id,
+        "field_data": [
+            {"name": "full_name", "values": ["Synthetic Candidate"]},
+            {"name": "phone_number", "values": ["+5511999990000"]},
+            {"name": "email", "values": ["synthetic@example.test"]},
+            {"name": "city", "values": ["Synthetic City"]},
+            {"name": "state", "values": ["SP"]},
+        ],
+    }
+
+
+def single_lead_settings(settings):
+    return options(settings).model_copy(update={"lead_ads_access_token": SecretStr(TOKEN)})
+
+
+def test_fetch_single_lead_calls_exact_id_validates_source_normalizes_and_records_history(migrated_database):
+    settings, database = migrated_database
+    settings = single_lead_settings(settings)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json=lead_ads_payload())
+
+    result = fetch_single_lead(database.session_factory, graph(handler), settings, lead_id="30")
+
+    assert len(calls) == 1
+    assert calls[0].method == "GET" and calls[0].url.path == "/v26.0/30"
+    assert calls[0].url.params["fields"] == "id,created_time,ad_id,form_id,field_data"
+    assert result == {
+        "outcome": "created", "history_created": True, "activity_type": "IMPORTED",
+        "changed_fields": [], "unmapped_fields": 0, "lead_count_before": 0,
+        "lead_count_after": 1, "lead_count_delta": 1,
+    }
+    with database.session_factory() as session:
+        lead = session.scalar(select(Lead))
+        assert (lead.full_name, lead.phone_number, lead.email, lead.city, lead.state) == (
+            "Synthetic Candidate", "+5511999990000", "synthetic@example.test", "Synthetic City", "SP"
+        )
+        assert lead.meta_form_id == "20" and lead.meta_page_id == "10"
+        assert lead.commercial_status == LeadStatus.NEW
+        assert session.scalar(select(func.count(Lead.id))) == 1
+        assert session.scalar(select(func.count(LeadActivity.id))) == 1
+        assert session.scalar(select(LeadActivity.activity_type)) == "IMPORTED"
+
+
+@pytest.mark.parametrize("status,expected", [(401, "graph_access_denied"), (403, "graph_access_denied"), (404, "graph_not_found")])
+def test_fetch_single_lead_graph_authentication_and_not_found_errors_do_not_write(migrated_database, status, expected):
+    settings, database = migrated_database
+    with pytest.raises(LeadAdsError) as error:
+        fetch_single_lead(database.session_factory, graph(lambda request: httpx.Response(status)),
+                          single_lead_settings(settings), lead_id="30")
+    assert error.value.code == expected
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count(Lead.id))) == 0
+        assert session.scalar(select(func.count(LeadActivity.id))) == 0
+
+
+def test_fetch_single_lead_rejects_unmapped_form_or_page_mismatch_before_write(migrated_database):
+    settings, database = migrated_database
+    unauthorized = graph(lambda request: httpx.Response(200, json=lead_ads_payload(form_id="99")))
+    with pytest.raises(LeadAdsError) as error:
+        fetch_single_lead(database.session_factory, unauthorized, single_lead_settings(settings), lead_id="30")
+    assert error.value.code == "source_not_allowed"
+
+    wrong_page_payload = lead_ads_payload()
+    wrong_page_payload["page_id"] = "999"
+    with pytest.raises(LeadAdsError) as error:
+        fetch_single_lead(database.session_factory,
+                          graph(lambda request: httpx.Response(200, json=wrong_page_payload)),
+                          single_lead_settings(settings), lead_id="30")
+    assert error.value.code == "source_mismatch"
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count(Lead.id))) == 0
+        assert session.scalar(select(func.count(LeadActivity.id))) == 0
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda value: value.pop("form_id"),
+    lambda value: value.update(field_data="malformed"),
+    lambda value: value.update(created_time="not-a-timestamp"),
+])
+def test_fetch_single_lead_malformed_response_does_not_write(migrated_database, mutate):
+    settings, database = migrated_database
+    body = lead_ads_payload()
+    mutate(body)
+    with pytest.raises(LeadAdsError) as error:
+        fetch_single_lead(database.session_factory,
+                          graph(lambda request: httpx.Response(200, json=body)),
+                          single_lead_settings(settings), lead_id="30")
+    assert error.value.code == "invalid_payload"
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count(Lead.id))) == 0
+        assert session.scalar(select(func.count(LeadActivity.id))) == 0
+
+
+def test_fetch_single_lead_database_failure_rolls_back(migrated_database):
+    settings, database = migrated_database
+    def fail_commit(_session):
+        raise SQLAlchemyError("synthetic-private-database-error")
+    event.listen(Session, "before_commit", fail_commit)
+    try:
+        with pytest.raises(SQLAlchemyError):
+            fetch_single_lead(database.session_factory,
+                              graph(lambda request: httpx.Response(200, json=lead_ads_payload())),
+                              single_lead_settings(settings), lead_id="30")
+    finally:
+        event.remove(Session, "before_commit", fail_commit)
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count(Lead.id))) == 0
+        assert session.scalar(select(func.count(LeadActivity.id))) == 0
+
+
+def test_fetch_single_lead_reimport_is_idempotent_and_preserves_commercial_state(migrated_database):
+    settings, database = migrated_database
+    settings = single_lead_settings(settings)
+    client = graph(lambda request: httpx.Response(200, json=lead_ads_payload()))
+    first = fetch_single_lead(database.session_factory, client, settings, lead_id="30")
+    with database.session_factory.begin() as session:
+        lead = session.scalar(select(Lead))
+        change_lead_status(session, lead, LeadStatus.CONTACTED)
+    second = fetch_single_lead(database.session_factory, client, settings, lead_id="30")
+    assert first["outcome"] == "created" and first["history_created"]
+    assert second["outcome"] == "already_existed" and not second["history_created"]
+    assert second["activity_type"] is None and second["lead_count_delta"] == 0
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count(Lead.id))) == 1
+        assert session.scalar(select(func.count(LeadActivity.id))) == 2
+        assert session.scalar(select(Lead.commercial_status)) == LeadStatus.CONTACTED
+
+
+def test_fetch_lead_cli_requires_network_flag_and_prints_no_personal_data(migrated_database, monkeypatch, capsys):
+    from meta_kpi_calc.crm import lead_ads_cli
+
+    settings, database = migrated_database
+    configured = single_lead_settings(settings)
+    monkeypatch.setattr(lead_ads_cli, "Settings", lambda: configured)
+    monkeypatch.setattr(lead_ads_cli, "MetaLeadAdsClient", lambda *args, **kwargs: graph(
+        lambda request: httpx.Response(200, json=lead_ads_payload())
+    ))
+    database_url = settings.demo_database_url
+    assert cli_main(["--database-url", database_url, "--lead-id", "30", "fetch-lead"]) == 2
+    assert json.loads(capsys.readouterr().out) == {"error": "network_not_authorized"}
+    assert cli_main(["--database-url", database_url, "--allow-network", "--lead-id", "30", "fetch-lead"]) == 0
+    output = capsys.readouterr().out
+    assert json.loads(output)["outcome"] == "created"
+    assert all(value not in output for value in ("Synthetic Candidate", "synthetic@example.test", "+5511999990000"))

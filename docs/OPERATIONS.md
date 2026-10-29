@@ -152,6 +152,37 @@ campaign_id, query), `GET /api/crm/leads/{id}`, `PATCH
 /api/crm/leads/{id}/activities`. O `query` pesquisa nome, e-mail, telefone ou
 ID da Meta e deve ser usado somente em contexto local controlado.
 
+## Fase 2B.2 — buscar uma lead por ID
+
+`fetch-lead` faz uma única leitura `GET /{lead-id}` pela Graph API. O comando
+exige `--allow-network` e um único `--lead-id`; não consulta a coleção do
+formulário, não inicia reconciliação ou worker e não muda status comercial.
+Antes de persistir, confere o `form_id` retornado contra
+`LEAD_ADS_AUTHORIZED_SOURCES` e usa a Página mapeada, que também deve estar em
+`LEAD_ADS_ALLOWED_PAGE_IDS`. Um `page_id` incluído na resposta precisa coincidir.
+
+Configure um token Lead Ads novo fora do Git. Não reutilize `META_ACCESS_TOKEN`
+nem cole credenciais em comandos/histórico de shell. `LEAD_ADS_API_VERSION` deve
+ser explícita. Faça backup consistente com SQLite Backup API e confirme o banco
+antes de executar; o comando se recusa a criar um arquivo de banco inexistente.
+O resumo stdout não contém nome, telefone, email ou respostas; mostra apenas
+outcome, atividade de importação e contagens agregadas.
+
+```bash
+LEAD_ADS_ENABLED=true \
+LEAD_ADS_API_VERSION=v26.0 \
+LEAD_ADS_ALLOWED_PAGE_IDS='["100130844916605"]' \
+LEAD_ADS_AUTHORIZED_SOURCES='{"3207253009465556":"100130844916605"}' \
+DEMO_MODE=false \
+.venv/bin/python -m meta_kpi_calc.crm.lead_ads_cli \
+  --database-url 'sqlite:///./data/meta_kpi.db' \
+  --allow-network --lead-id '1799753681047061' fetch-lead
+```
+
+Uma reexecução da mesma lead é idempotente: não duplica a linha nem a atividade
+de importação; `ingest_lead()` também preserva estado comercial e campos locais.
+Consulte `STATUS.md` para o resultado real e o backup desta execução controlada.
+
 ## Painel, filtros e relatório
 
 O painel abre dados fictícios com o banner de demonstração e usa o intervalo
