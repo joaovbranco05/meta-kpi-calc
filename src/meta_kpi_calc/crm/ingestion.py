@@ -7,10 +7,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from meta_kpi_calc.db.models import Campaign
+from meta_kpi_calc.db.upsert import insert_for_session
 from meta_kpi_calc.crm.models import (
     Lead,
     LeadActivity,
@@ -55,7 +55,7 @@ def ingest_lead(session: Session, submission: LeadSubmission) -> IngestResult:
         values["campaign_id"] = campaign.id
 
     now = datetime.now(timezone.utc)
-    stmt = sqlite_insert(Lead).values(**values).on_conflict_do_nothing(
+    stmt = insert_for_session(session, Lead).values(**values).on_conflict_do_nothing(
         index_elements=[Lead.meta_lead_id]
     ).returning(Lead.id)
     inserted_id = session.scalar(stmt)

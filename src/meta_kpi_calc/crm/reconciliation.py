@@ -5,9 +5,9 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from sqlalchemy import or_, update
-from sqlalchemy.dialects.sqlite import insert
 
 from meta_kpi_calc.core.config import Settings
+from meta_kpi_calc.db.upsert import insert_for_session
 from meta_kpi_calc.crm.ingestion import ingest_lead
 from meta_kpi_calc.crm.inbox import utcnow
 from meta_kpi_calc.crm.inbox_models import ReconciliationState
@@ -40,7 +40,7 @@ def reconcile_form(factory, client: MetaLeadAdsClient, settings: Settings, *,
     explicit_start = _input_time(start) if start is not None else None
     token = uuid4().hex
     with factory.begin() as session:
-        session.execute(insert(ReconciliationState).values(
+        session.execute(insert_for_session(session, ReconciliationState).values(
             meta_page_id=page_id, meta_form_id=form_id,
         ).on_conflict_do_nothing(index_elements=[ReconciliationState.meta_page_id, ReconciliationState.meta_form_id]))
         row = session.execute(update(ReconciliationState).where(

@@ -5,10 +5,10 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from sqlalchemy import and_, or_, select, update
-from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session
 
 from meta_kpi_calc.core.config import Settings
+from meta_kpi_calc.db.upsert import insert_for_session
 from meta_kpi_calc.crm.ingestion import ingest_lead
 from meta_kpi_calc.crm.inbox_models import WebhookEvent
 from meta_kpi_calc.crm.lead_ads_client import LeadAdsError
@@ -37,7 +37,7 @@ class ClaimedEvent:
 
 def enqueue_events(session: Session, events: list[EventInput]) -> None:
     for event in events:
-        session.execute(insert(WebhookEvent).values(
+        session.execute(insert_for_session(session, WebhookEvent).values(
             dedup_key=f"meta:leadgen:{event.page_id}:{event.lead_id}",
             meta_lead_id=event.lead_id, meta_page_id=event.page_id,
             meta_form_id=event.form_id, meta_ad_id=event.ad_id,
@@ -57,9 +57,12 @@ def claim_event(session: Session, settings: Settings, now: datetime) -> ClaimedE
         _eligible(now), WebhookEvent.attempts >= settings.lead_ads_max_attempts,
     ).values(status="FAILED", lease_token=None, lease_expires_at=None,
              error_code="attempts_exhausted", updated_at=now))
-    candidate = select(WebhookEvent.id).where(
+    candidate_query = select(WebhookEvent.id).where(
         _eligible(now), WebhookEvent.attempts < settings.lead_ads_max_attempts,
-    ).order_by(WebhookEvent.received_at, WebhookEvent.id).limit(1).scalar_subquery()
+    ).order_by(WebhookEvent.received_at, WebhookEvent.id).limit(1)
+    if session.get_bind().dialect.name == "postgresql":
+        candidate_query = candidate_query.with_for_update(skip_locked=True)
+    candidate = candidate_query.scalar_subquery()
     token = uuid4().hex
     row = session.execute(update(WebhookEvent).where(
         WebhookEvent.id == candidate, _eligible(now),
@@ -86,7 +89,7 @@ def complete_event(session: Session, claim: ClaimedEvent, normalized: Normalized
     )).rowcount
     if not updated:
         return False
-    # This UPDATE acquired the SQLite write lock; ingestion and completion commit together.
+    # The fenced update locks the event; ingestion and completion commit together.
     ingest_lead(session, normalized.submission)
     return True
 

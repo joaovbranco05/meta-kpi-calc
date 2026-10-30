@@ -15,22 +15,23 @@ from meta_kpi_calc.crm.import_files import ImportFileError, parse_meta_export
 from meta_kpi_calc.crm.ingestion import ingest_lead
 from meta_kpi_calc.crm.models import Lead
 from meta_kpi_calc.core.config import Settings
-from meta_kpi_calc.db.session import create_sqlite_engine
+from meta_kpi_calc.db.session import create_database_engine
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Import a Meta lead export into a local SQLite database.")
+    parser = argparse.ArgumentParser(description="Import a Meta lead export into a migrated database.")
     parser.add_argument("file", type=Path)
-    parser.add_argument("--database-url", required=True, help="Explicit SQLite URL; Alembic migrations must already be applied.")
+    parser.add_argument("--database-url", required=True, help="Explicit database URL; Alembic migrations must already be applied.")
     parser.add_argument("--commit", action="store_true", help="Persist rows; default is a read-only dry run.")
     args = parser.parse_args(argv)
     try:
         url = make_url(args.database_url)
-        if url.drivername != "sqlite" or not url.database:
-            parser.error("--database-url must identify a SQLite database.")
-        database_path = Path(url.database)
-        if url.database == ":memory:" or not database_path.is_file():
-            parser.error("--database-url must identify an existing migrated SQLite file.")
+        if url.drivername not in {"sqlite", "postgresql", "postgresql+psycopg"} or not url.database:
+            parser.error("--database-url must identify a SQLite or PostgreSQL database.")
+        if url.drivername == "sqlite":
+            database_path = Path(url.database)
+            if url.database == ":memory:" or not database_path.is_file():
+                parser.error("--database-url must identify an existing migrated SQLite file.")
         with args.file.open("rb") as stream:
             submissions, report = parse_meta_export(stream, args.file.name)
     except (OSError, ImportFileError) as exc:
@@ -42,9 +43,9 @@ def main(argv: list[str] | None = None) -> int:
         _env_file=None,
         demo_mode=False,
         database_url=args.database_url,
-        demo_database_url=f"{args.database_url}.demo-unused",
+        demo_database_url="sqlite:///:memory:",
     )
-    engine = create_sqlite_engine(settings) if args.commit else create_engine(args.database_url)
+    engine = create_database_engine(settings) if args.commit else create_engine(settings.active_database_url, hide_parameters=True)
     try:
         with Session(engine, expire_on_commit=False) as session:
             if args.commit:

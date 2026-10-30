@@ -28,7 +28,9 @@ def _summary(factory) -> dict:
         attempts = session.scalar(select(func.coalesce(func.sum(WebhookEvent.attempts), 0)))
         reconciliation = dict(session.execute(select(ReconciliationState.last_result, func.count()).group_by(ReconciliationState.last_result)).all())
     from datetime import timezone
-    age = max(0, int((utcnow() - pending.replace(tzinfo=timezone.utc)).total_seconds())) if pending else None
+    if pending is not None:
+        pending = pending.replace(tzinfo=timezone.utc) if pending.tzinfo is None else pending.astimezone(timezone.utc)
+    age = max(0, int((utcnow() - pending).total_seconds())) if pending else None
     return {"events": states, "attempts_total": attempts, "reconciliation_results": reconciliation,
             "oldest_pending_seconds": age, "last_reconciliation_at": last.isoformat() if last else None}
 
@@ -47,20 +49,24 @@ def main(argv: list[str] | None = None) -> int:
     database = None
     try:
         url = make_url(args.database_url)
-        if url.drivername != "sqlite" or not url.database or url.database == ":memory:":
+        if url.drivername not in {"sqlite", "postgresql", "postgresql+psycopg"} or not url.database or url.database == ":memory:":
             raise LeadAdsError("database_unavailable")
-        database_path = Path(url.database).resolve()
-        if not database_path.is_file():
-            raise LeadAdsError("database_unavailable")
-        # Canonicalize once before Settings can resolve relative paths differently.
-        database_url = URL.create("sqlite", database=str(database_path)).render_as_string(hide_password=False)
+        if url.drivername == "sqlite":
+            database_path = Path(url.database).resolve()
+            if not database_path.is_file():
+                raise LeadAdsError("database_unavailable")
+            database_url = URL.create("sqlite", database=str(database_path)).render_as_string(hide_password=False)
+        else:
+            if not url.host:
+                raise LeadAdsError("database_unavailable")
+            database_url = url.set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
         configured = Settings()
         if args.command != "status" and (not args.allow_network or configured.demo_mode or not configured.lead_ads_graph_ready):
             raise LeadAdsError("network_not_authorized")
         if not 1 <= args.max_events <= 10000:
             raise LeadAdsError("configuration_invalid")
         settings = configured.model_copy(update={"database_url": database_url,
-            "demo_database_url": database_url + ".demo-unused", "demo_mode": False})
+            "demo_database_url": "sqlite:///:memory:", "demo_mode": False})
         configure_logging(settings)
         database = Database(settings)
         if args.command == "status":

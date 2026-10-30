@@ -18,6 +18,8 @@ def _ensure_database_directory(database_url: str) -> None:
 
 def create_sqlite_engine(settings: Settings) -> Engine:
     database_url = settings.active_database_url
+    if make_url(database_url).get_backend_name() != "sqlite":
+        raise ValueError("SQLite engine requires a SQLite URL")
     _ensure_database_directory(database_url)
     engine = create_engine(
         database_url,
@@ -38,9 +40,15 @@ def create_sqlite_engine(settings: Settings) -> Engine:
     return engine
 
 
+def create_database_engine(settings: Settings) -> Engine:
+    if make_url(settings.active_database_url).get_backend_name() == "sqlite":
+        return create_sqlite_engine(settings)
+    return create_engine(settings.active_database_url, pool_pre_ping=True, hide_parameters=True)
+
+
 class Database:
     def __init__(self, settings: Settings) -> None:
-        self.engine = create_sqlite_engine(settings)
+        self.engine = create_database_engine(settings)
         self.session_factory = sessionmaker(
             bind=self.engine,
             class_=Session,

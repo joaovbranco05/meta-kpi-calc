@@ -1,4 +1,4 @@
-"""Validated settings with deterministic SQLite paths."""
+"""Validated settings for SQLite and PostgreSQL databases."""
 
 import re
 from functools import lru_cache
@@ -29,6 +29,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     app_name: str = "Meta KPI Calculator"
@@ -115,11 +116,18 @@ class Settings(BaseSettings):
 
     @field_validator("database_url", "demo_database_url")
     @classmethod
-    def validate_sqlite_url(cls, value: str) -> str:
-        url = make_url(value)
-        if url.drivername != "sqlite" or not url.database:
-            raise ValueError("Database URLs must use SQLite and include a database path")
-        return value
+    def validate_database_url(cls, value: str) -> str:
+        try:
+            url = make_url(value)
+        except Exception:
+            raise ValueError("Invalid database URL") from None
+        if url.drivername not in {"sqlite", "postgresql", "postgresql+psycopg"} or not url.database:
+            raise ValueError("Database URLs must use SQLite or PostgreSQL and include a database name")
+        if url.drivername.startswith("postgresql") and not url.host:
+            raise ValueError("PostgreSQL URLs must include a host")
+        if url.drivername == "postgresql":
+            url = url.set(drivername="postgresql+psycopg")
+        return url.render_as_string(hide_password=False)
 
     @field_validator("meta_ad_account_id", mode="before")
     @classmethod
@@ -147,13 +155,15 @@ class Settings(BaseSettings):
             raise ValueError("Lead Ads reconciliation sources must use allowed pages")
         if self.sync_lookback_days > self.max_sync_days:
             raise ValueError("SYNC_LOOKBACK_DAYS cannot exceed MAX_SYNC_DAYS")
-        if self.resolved_database_url == self.resolved_demo_database_url:
-            raise ValueError("Demo and real databases must use different files")
+        if self._database_identity(self.resolved_database_url) == self._database_identity(self.resolved_demo_database_url):
+            raise ValueError("Demo and real databases must be different")
         return self
 
     @staticmethod
     def _resolve_sqlite_url(value: str) -> str:
         url = make_url(value)
+        if url.get_backend_name() != "sqlite":
+            return value
         database = url.database
         if database == ":memory:":
             return value
@@ -163,6 +173,13 @@ class Settings(BaseSettings):
         return URL.create("sqlite", database=str(path)).render_as_string(
             hide_password=False
         )
+
+    @staticmethod
+    def _database_identity(value: str) -> tuple:
+        url = make_url(value)
+        if url.get_backend_name() == "sqlite":
+            return ("sqlite", url.database)
+        return ("postgresql", (url.host or "").lower(), url.port or 5432, url.database)
 
     @property
     def resolved_database_url(self) -> str:

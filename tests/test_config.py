@@ -40,7 +40,7 @@ def test_relative_database_paths_are_resolved_from_project_root() -> None:
     [
         ({"app_timezone": "Invalid/Timezone"}, "APP_TIMEZONE"),
         ({"sync_lookback_days": 32, "max_sync_days": 31}, "SYNC_LOOKBACK_DAYS"),
-        ({"database_url": "postgresql://localhost/db"}, "SQLite"),
+        ({"database_url": "mysql://localhost/db"}, "SQLite or PostgreSQL"),
     ],
 )
 def test_invalid_settings_are_rejected(
@@ -52,8 +52,25 @@ def test_invalid_settings_are_rejected(
 
 def test_demo_and_real_database_cannot_be_the_same(tmp_path: Path) -> None:
     same = f"sqlite:///{tmp_path / 'same.db'}"
-    with pytest.raises(ValidationError, match="different files"):
+    with pytest.raises(ValidationError, match="must be different"):
         Settings(_env_file=None, database_url=same, demo_database_url=same)
+
+
+def test_postgresql_url_preserves_credentials_and_uses_psycopg(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path, database_url="postgresql://user:p%40ss@localhost:5432/example", demo_mode=False)
+    assert settings.active_database_url == "postgresql+psycopg://user:p%40ss@localhost:5432/example"
+
+
+def test_same_postgresql_database_is_rejected_with_different_users() -> None:
+    with pytest.raises(ValidationError, match="must be different"):
+        Settings(_env_file=None, database_url="postgresql://one@localhost/db",
+                 demo_database_url="postgresql+psycopg://two@localhost:5432/db")
+
+
+def test_invalid_database_url_does_not_display_password(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError) as error:
+        make_settings(tmp_path, database_url="mysql://user:synthetic-secret@localhost/db")
+    assert "synthetic-secret" not in str(error.value)
 
 
 @pytest.mark.parametrize(
