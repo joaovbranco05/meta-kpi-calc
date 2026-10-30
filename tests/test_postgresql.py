@@ -50,6 +50,16 @@ from test_api_rest import (
     test_enrollment_create_list_replace_conflicts_and_rollback as enrollment_api,
 )
 
+from test_continuous_worker import (
+    test_worker_empty_then_new_event_and_restart as continuous_restart,
+    test_worker_problem_event_does_not_block_next as continuous_problem,
+    test_cycle_failure_backoff_and_safe_logs as continuous_backoff,
+    test_expired_lease_recovered_by_continuous_worker as continuous_lease,
+    test_two_workers_do_not_process_same_event as continuous_concurrent,
+    test_stop_during_event_does_not_claim_next as continuous_stop,
+    test_real_signal_stops_during_wait as continuous_signal,
+)
+
 SOCKET = os.environ.get("META_KPI_TEST_PG_SOCKET")
 pytestmark = pytest.mark.skipif(not SOCKET, reason="PostgreSQL disposable test cluster not supplied")
 
@@ -192,3 +202,17 @@ def test_migrate_synthetic_sqlite_snapshot(pg_database, migrated_database, tmp_p
         assert ingest_lead(session, LeadSubmission("456", {})).lead.id > lead.id
     with pytest.raises(ValueError, match="empty"):
         migrate_snapshot(snapshot, target.engine, execute=True)
+
+
+@pytest.mark.parametrize("check", [continuous_restart, continuous_problem, continuous_lease, continuous_concurrent, continuous_stop])
+def test_continuous_worker_shared_contracts(pg_database, check):
+    check(pg_database)
+
+
+def test_continuous_worker_backoff(pg_database, monkeypatch, caplog):
+    continuous_backoff(pg_database, monkeypatch, caplog)
+
+
+@pytest.mark.parametrize("sig", [__import__("signal").SIGTERM, __import__("signal").SIGINT])
+def test_continuous_worker_signals(pg_database, sig):
+    continuous_signal(pg_database, sig)

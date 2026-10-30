@@ -37,8 +37,8 @@ def _summary(factory) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Local Lead Ads technical commands; network requires explicit opt-in.")
-    parser.add_argument("command", choices=("status", "process", "reconcile", "fetch-lead"))
-    parser.add_argument("--database-url", required=True)
+    parser.add_argument("command", choices=("status", "process", "worker", "reconcile", "fetch-lead"))
+    parser.add_argument("--database-url", help="Database URL; worker defaults to the configured active database.")
     parser.add_argument("--allow-network", action="store_true")
     parser.add_argument("--max-events", type=int, default=100)
     parser.add_argument("--lead-id", help="Single lead ID required by fetch-lead.")
@@ -48,7 +48,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     database = None
     try:
-        url = make_url(args.database_url)
+        configured = Settings()
+        if not args.database_url and args.command != "worker":
+            raise LeadAdsError("database_unavailable")
+        url = make_url(args.database_url or configured.active_database_url)
         if url.drivername not in {"sqlite", "postgresql", "postgresql+psycopg"} or not url.database or url.database == ":memory:":
             raise LeadAdsError("database_unavailable")
         if url.drivername == "sqlite":
@@ -60,7 +63,6 @@ def main(argv: list[str] | None = None) -> int:
             if not url.host:
                 raise LeadAdsError("database_unavailable")
             database_url = url.set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
-        configured = Settings()
         if args.command != "status" and (not args.allow_network or configured.demo_mode or not configured.lead_ads_graph_ready):
             raise LeadAdsError("network_not_authorized")
         if not 1 <= args.max_events <= 10000:
@@ -76,6 +78,10 @@ def main(argv: list[str] | None = None) -> int:
                 client = MetaLeadAdsClient(http, token=settings.lead_ads_access_token.get_secret_value(),
                                           api_version=settings.lead_ads_api_version,
                                           max_pages=settings.lead_ads_max_pages, page_size=settings.lead_ads_page_size)
+                if args.command == "worker":
+                    from meta_kpi_calc.crm.continuous_worker import run_with_signals
+                    run_with_signals(database.session_factory, client, settings)
+                    return 0
                 if args.command == "process":
                     result = process_events(database.session_factory, client, settings, max_events=args.max_events)
                 elif args.command == "reconcile":

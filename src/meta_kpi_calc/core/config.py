@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     lead_ads_retry_max_seconds: int = Field(default=3600, ge=1, le=86400)
     lead_ads_overlap_seconds: int = Field(default=300, ge=0, le=86400)
     lead_ads_scan_max_days: int = Field(default=31, ge=1, le=365)
+    lead_ads_worker_batch_size: int = Field(default=100, ge=1, le=10000)
+    lead_ads_worker_poll_seconds: float = Field(default=5, ge=0.1, le=3600, allow_inf_nan=False)
+    lead_ads_worker_backoff_base_seconds: float = Field(default=5, ge=0.1, le=3600, allow_inf_nan=False)
+    lead_ads_worker_backoff_max_seconds: float = Field(default=300, ge=0.1, le=86400, allow_inf_nan=False)
 
     scheduler_enabled: bool = False
     sync_interval_minutes: int = Field(default=60, gt=0)
@@ -151,6 +155,8 @@ class Settings(BaseSettings):
     def validate_relationships(self) -> "Settings":
         if self.lead_ads_retry_base_seconds > self.lead_ads_retry_max_seconds:
             raise ValueError("Lead Ads retry policy is invalid")
+        if self.lead_ads_worker_backoff_base_seconds > self.lead_ads_worker_backoff_max_seconds:
+            raise ValueError("Worker backoff policy is invalid")
         if any(page not in self.lead_ads_allowed_page_ids for page in self.lead_ads_authorized_sources.values()):
             raise ValueError("Lead Ads reconciliation sources must use allowed pages")
         if self.sync_lookback_days > self.max_sync_days:

@@ -46,11 +46,14 @@ def fetch_single_lead(factory, client: MetaLeadAdsClient, settings: Settings, *,
 
 
 def process_events(factory, client: MetaLeadAdsClient, settings: Settings, *,
-                   max_events: int = 100, clock: Callable[[], datetime] = utcnow) -> dict[str, int]:
+                   max_events: int = 100, clock: Callable[[], datetime] = utcnow,
+                   should_stop: Callable[[], bool] = lambda: False) -> dict[str, int]:
     if not 1 <= max_events <= 10000:
         raise ValueError("Worker limit is invalid.")
     counts = {"claimed": 0, "completed": 0, "failed_or_retry": 0, "lease_lost": 0, "unmapped_fields": 0}
     for _ in range(max_events):
+        if should_stop():
+            break
         with factory.begin() as session:
             claim = claim_event(session, settings, clock())
         if claim is None:
