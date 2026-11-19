@@ -216,3 +216,28 @@ def test_continuous_worker_backoff(pg_database, monkeypatch, caplog):
 @pytest.mark.parametrize("sig", [__import__("signal").SIGTERM, __import__("signal").SIGINT])
 def test_continuous_worker_signals(pg_database, sig):
     continuous_signal(pg_database, sig)
+
+
+def test_standalone_postgresql_ingress(pg_database):
+    from test_webhook_gateway import test_public_service_writes_to_worker_inbox_without_admin
+
+    test_public_service_writes_to_worker_inbox_without_admin(pg_database)
+
+
+def test_standalone_postgresql_write_failure_returns_503(pg_database):
+    from fastapi.testclient import TestClient
+    from test_lead_ads import notification, options, signed
+
+    from meta_kpi_calc.crm.webhook_gateway import create_webhook_gateway_app
+
+    settings, database = pg_database
+    config = options(settings).model_copy(update={"database_url": settings.active_database_url})
+    with database.engine.begin() as connection:
+        connection.execute(text("ALTER TABLE webhook_events RENAME TO unavailable_inbox"))
+    with TestClient(create_webhook_gateway_app(config)) as client:
+        response = client.post("/webhooks/meta/lead-ads", **signed(notification()))
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "database_unavailable"
+    assert "webhook_events" not in response.text
+    with database.engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM unavailable_inbox")) == 0

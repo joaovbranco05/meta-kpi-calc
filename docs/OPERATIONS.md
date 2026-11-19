@@ -281,64 +281,43 @@ Em falha:
   autônoma. Antes da entrega ao cliente, reconcilie uma janela curta com a
   fonte comercial definida e siga o roteiro `customer-pilot-readiness`.
 
-## Fase 2B.3 — preparação local do callback
+## Fase 3 — webhook independente
 
-`meta_kpi_calc.crm.webhook_gateway:app` é um gateway separado que encaminha
-somente `GET` e `POST /webhooks/meta/lead-ads` para a API em `127.0.0.1:8000`.
-Os demais caminhos retornam 404, os demais métodos retornam 405, e o gateway
-não oferece docs, OpenAPI, health, arquivos estáticos ou acesso ao CRM/Analytics.
-O corpo é limitado por `LEAD_ADS_BODY_MAX_BYTES` e somente os cabeçalhos de
-conteúdo, assinatura Meta e accept são encaminhados. O upstream é fixo em
-loopback. A API privada e o gateway devem continuar vinculados a `127.0.0.1`.
+O processo público monta apenas o callback `GET/POST /webhooks/meta/lead-ads`.
+Outros caminhos, inclusive documentação e APIs privadas, retornam 404;
+outros métodos no callback retornam 405. A assinatura HMAC e as allowlists são
+validadas antes da gravação. O POST responde 200 depois do commit da inbox
+e retorna 503 se a persistência falhar por indisponibilidade do banco.
+O limite do corpo é definido por `LEAD_ADS_BODY_MAX_BYTES`.
 
-Configuração sem segredos deve incluir `LEAD_ADS_ENABLED=true`,
-`LEAD_ADS_API_VERSION` explícita, `LEAD_ADS_ALLOWED_PAGE_IDS` e
-`LEAD_ADS_AUTHORIZED_SOURCES` (formulário→Página). App Secret, Verify Token e
-Access Token Lead Ads ficam apenas no `.env`/secret manager local, em entradas
-separadas; não os envie no chat nem na linha de comando. Modo demo deve estar
-desativado e a aplicação deve usar o banco real intencionalmente selecionado.
-Handshake só fica pronto quando App Secret, Verify Token, allowlist e ao menos
-um mapping autorizado estiverem presentes.
+Configure `DEMO_MODE=false`, `LEAD_ADS_ENABLED=true`, App Secret, Verify Token,
+`LEAD_ADS_ALLOWED_PAGE_IDS` e `LEAD_ADS_AUTHORIZED_SOURCES` (formulário→Página).
+Configure o webhook e o worker para o mesmo banco PostgreSQL com o schema já
+migrado. O token Graph e `LEAD_ADS_API_VERSION` são necessários ao worker;
+o webhook usa apenas as credenciais de ingress e de banco. Guarde segredos no
+ambiente do serviço ou em arquivo local protegido.
 
-Para preparação local, após revisar a configuração e o caminho do banco:
+Inicie cada processo em seu terminal, a partir da raiz do projeto:
 
 ```bash
 uvicorn meta_kpi_calc.api.app:app --app-dir src --host 127.0.0.1 --port 8000
-uvicorn meta_kpi_calc.crm.webhook_gateway:app --app-dir src --host 127.0.0.1 --port 8765
+uvicorn meta_kpi_calc.crm.webhook_gateway:app --app-dir src --host 127.0.0.1 --port 8765 --no-access-log
 ```
 
-O segundo comando expõe localmente somente a fronteira webhook-only. Ainda
-assim, **não encaminhe a porta 8765 à internet até receber autorização explícita**.
-Quando a etapa externa for autorizada, o túnel deverá apontar exclusivamente
-para `127.0.0.1:8765`, nunca para a porta 8000 ou para o Streamlit. Não há um
-provedor de túnel escolhido/configurado nesta entrega; opções que exijam conta,
-instalação ou autenticação devem ser avaliadas com o operador primeiro.
+Use Ctrl+C no terminal correspondente para parar cada processo. O webhook
+funciona com a porta 8000 desligada. O diagnóstico opcional registra somente
+timestamp, método, status e código interno. Em hospedagem, direcione a entrada
+HTTPS apenas ao webhook, mantenha a API em rede privada e desative logs com
+querystrings ou corpos também na borda. Valide TLS e o roteamento privado no
+ambiente de hospedagem antes de receber eventos reais.
 
-Para encerrar cada processo, use Ctrl-C no terminal correspondente e confirme
-que as portas 8000/8765 foram liberadas. Antes da futura publicação, será
-necessário provar por HTTPS que somente o callback GET/POST responde e que
-`/api/crm/*`, `/api/meta/*`, `/api/dashboard/*`, `/docs`, `/openapi.json`,
-`/health`, `/redoc`, paths alternativos e métodos não permitidos são bloqueados
-na fronteira pública. Esta entrega comprova o comportamento do gateway por
-testes locais com upstream mockado; não comprova TLS, túnel nem isolamento em
-uma fronteira pública.
-
-O estado da inbox pode ser consultado sem rede:
+Consulte a inbox de uma cópia SQLite local com o comando `status`, que não
+consulta a Meta:
 
 ```bash
 PYTHONPATH=src python -m meta_kpi_calc.crm.lead_ads_cli status \
-  --database-url sqlite:////caminho/absoluto/data/meta_kpi.db
+  --database-url sqlite:////caminho/absoluto/da-copia.db
 ```
 
-Só depois de autorizar e receber exatamente um evento fictício esperado na
-inbox, conferir ausência de eventos pendentes inesperados e fazer backup
-consistente do SQLite, execute manualmente:
-
-```bash
-PYTHONPATH=src python -m meta_kpi_calc.crm.lead_ads_cli process \
-  --database-url sqlite:////caminho/absoluto/data/meta_kpi.db \
-  --max-events 1 --allow-network
-```
-
-O worker consulta a Graph API e grava lead/histórico; não o execute antes desses
-controles. Não usar reconciliação nesta etapa.
+O processamento é uma operação separada e opt-in. Veja
+[worker contínuo](WORKER_CONTINUO.md) para os controles operacionais.

@@ -12,16 +12,21 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import event, func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
-from pydantic import SecretStr
 from starlette.requests import Request
 
-from meta_kpi_calc.api.app import create_app
 from meta_kpi_calc.core.config import Settings
 from meta_kpi_calc.core.logging import configure_logging
-from meta_kpi_calc.crm.inbox import EventInput, claim_event, complete_event, enqueue_events, fail_event
+from meta_kpi_calc.crm.inbox import (
+    EventInput,
+    claim_event,
+    complete_event,
+    enqueue_events,
+    fail_event,
+)
 from meta_kpi_calc.crm.inbox_models import ReconciliationState, WebhookEvent
 from meta_kpi_calc.crm.ingestion import change_lead_status
 from meta_kpi_calc.crm.lead_ads_cli import main as cli_main
@@ -31,6 +36,7 @@ from meta_kpi_calc.crm.normalizer import normalize_lead
 from meta_kpi_calc.crm.processing import fetch_single_lead, process_events
 from meta_kpi_calc.crm.reconciliation import reconcile_form
 from meta_kpi_calc.crm.webhook import receive_webhook
+from meta_kpi_calc.crm.webhook_gateway import create_webhook_gateway_app
 
 NOW = datetime(2026, 10, 29, 12, tzinfo=timezone.utc)
 SECRET = "synthetic-app-secret"
@@ -87,7 +93,7 @@ def test_settings_are_independent_fail_closed_and_validate_sources():
 
 def test_webhook_handshake_disabled_valid_and_invalid(migrated_database):
     settings, database = migrated_database
-    app = create_app(settings)
+    app = create_webhook_gateway_app(settings)
     app.state.database = database
     with TestClient(app) as client:
         assert client.get("/webhooks/meta/lead-ads").status_code == 503
@@ -104,7 +110,7 @@ def test_webhook_handshake_disabled_valid_and_invalid(migrated_database):
 
 def test_webhook_batch_dedup_and_durable_ack_without_graph(migrated_database):
     settings, database = migrated_database
-    app = create_app(options(settings)); app.state.database = database
+    app = create_webhook_gateway_app(options(settings)); app.state.database = database
     data = notification()
     data["entry"].append(notification("31")["entry"][0])
     with TestClient(app) as client:
@@ -120,7 +126,7 @@ def test_webhook_batch_dedup_and_durable_ack_without_graph(migrated_database):
 @pytest.mark.parametrize("signature", [None, "bad", "sha256=" + "0" * 64, "sha256=" + "z" * 64])
 def test_webhook_rejects_signature_without_writes(migrated_database, signature):
     settings, database = migrated_database
-    app = create_app(options(settings)); app.state.database = database
+    app = create_webhook_gateway_app(options(settings)); app.state.database = database
     headers = {"X-Hub-Signature-256": signature} if signature else {}
     with TestClient(app) as client:
         response = client.post("/webhooks/meta/lead-ads", content=b'{"private":"synthetic-private"}', headers=headers)
@@ -133,7 +139,7 @@ def test_webhook_rejects_signature_without_writes(migrated_database, signature):
 @pytest.mark.parametrize("case,expected", [("mixed_page", 403), ("bad_id", 400), ("bad_object", 400), ("mismatch", 400), ("unsupported", 200)])
 def test_webhook_batch_atomic_validation(migrated_database, case, expected):
     settings, database = migrated_database
-    app = create_app(options(settings)); app.state.database = database
+    app = create_webhook_gateway_app(options(settings)); app.state.database = database
     data = notification()
     if case == "mixed_page": data["entry"].append(notification("31", "99")["entry"][0])
     if case == "bad_id": data["entry"][0]["changes"].append({"field": "leadgen", "value": {"leadgen_id": "../private"}})
@@ -148,7 +154,7 @@ def test_webhook_batch_atomic_validation(migrated_database, case, expected):
 
 def test_webhook_rejects_form_not_authorized_for_page(migrated_database):
     settings, database = migrated_database
-    app = create_app(options(settings)); app.state.database = database
+    app = create_webhook_gateway_app(options(settings)); app.state.database = database
     data = notification()
     data["entry"][0]["changes"][0]["value"]["form_id"] = "99"
     with TestClient(app) as client:
@@ -162,7 +168,7 @@ def test_webhook_rejects_form_not_authorized_for_page(migrated_database):
 def test_webhook_stream_size_limit_counts_chunks_before_parsing(migrated_database):
     settings, database = migrated_database
     settings = options(settings).model_copy(update={"lead_ads_body_max_bytes": 1024})
-    app = create_app(settings); app.state.database = database
+    app = create_webhook_gateway_app(settings); app.state.database = database
     chunks = iter([{"type": "http.request", "body": b"a" * 800, "more_body": True},
                    {"type": "http.request", "body": b"b" * 800, "more_body": True}])
     async def receive(): return next(chunks)
@@ -174,7 +180,7 @@ def test_webhook_stream_size_limit_counts_chunks_before_parsing(migrated_databas
 
 def test_webhook_db_failure_never_acknowledges(migrated_database, monkeypatch):
     settings, database = migrated_database
-    app = create_app(options(settings)); app.state.database = database
+    app = create_webhook_gateway_app(options(settings)); app.state.database = database
     def fail(*args): raise SQLAlchemyError("synthetic-private")
     monkeypatch.setattr("meta_kpi_calc.crm.webhook._persist", fail)
     with TestClient(app) as client:
@@ -452,7 +458,7 @@ def test_graph_urls_and_cursors_are_redacted_in_httpx_logs(caplog):
 
 def test_webhook_signed_malformed_json_and_tampered_bytes_rejected(migrated_database):
     settings, database = migrated_database
-    app = create_app(options(settings)); app.state.database = database
+    app = create_webhook_gateway_app(options(settings)); app.state.database = database
     raw = b'{"synthetic":'
     signature = hmac.new(SECRET.encode(), raw, hashlib.sha256).hexdigest()
     with TestClient(app) as client:
@@ -464,7 +470,7 @@ def test_webhook_signed_malformed_json_and_tampered_bytes_rejected(migrated_data
 def test_webhook_commit_failure_rolls_back_and_lost_ack_replays_safely(migrated_database, monkeypatch):
     from meta_kpi_calc.crm import webhook
     settings, database = migrated_database
-    app = create_app(options(settings)); app.state.database = database
+    app = create_webhook_gateway_app(options(settings)); app.state.database = database
     def commit_failure(connection): raise SQLAlchemyError("synthetic-private")
     event.listen(database.engine, "commit", commit_failure)
     with TestClient(app) as client:
@@ -559,7 +565,7 @@ def test_webhook_cannot_ingest_into_demo_database_even_when_configured(migrated_
     settings, database = migrated_database
     configured = options(settings).model_copy(update={"demo_mode": True})
     assert not configured.lead_ads_ingress_ready
-    app = create_app(configured); app.state.database = database
+    app = create_webhook_gateway_app(configured); app.state.database = database
     with TestClient(app) as client:
         assert client.post("/webhooks/meta/lead-ads", **signed(notification())).status_code == 503
     with database.session_factory() as session:

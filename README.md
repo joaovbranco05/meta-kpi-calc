@@ -189,18 +189,18 @@ DEMO_MODE=false \
 O estado e as evidências da execução real (ou o motivo de ela não ter ocorrido)
 estão em `docs/STATUS.md`. Webhook e reconciliação continuam fora deste teste.
 
-### Fase 2B.3 — preparação local do webhook
+### Fase 3 — webhook independente
 
-`meta_kpi_calc.crm.webhook_gateway:app` é um alvo local isolado para eventual
-túnel: só encaminha o path exato `/webhooks/meta/lead-ads` com GET/POST para a
-API em `127.0.0.1:8000`; bloqueia os demais paths/métodos, limita o corpo e não
-repassa cookies, autorização ou cabeçalhos de encaminhamento. Não tem docs,
-OpenAPI ou health endpoint. Testes usam upstream mockado. **Túnel público,
-painel Meta, geração de lead e worker real ainda não foram iniciados.** O `.env`
-atual não está pronto para ingress: faltam App Secret, Verify Token, allowlist,
-mapping form→Página, versão Lead Ads explícita e habilitação. Configure-os
-localmente; nunca compartilhe segredos no chat. Consulte
-[`docs/OPERATIONS.md`](docs/OPERATIONS.md) e [`docs/STATUS.md`](docs/STATUS.md).
+O serviço dedicado recebe somente GET e POST em `/webhooks/meta/lead-ads`.
+Ele grava na inbox compartilhada com o worker e responde apenas após o commit.
+API administrativa e webhook são processos independentes, iniciados em terminais separados:
+
+```bash
+uvicorn meta_kpi_calc.api.app:app --app-dir src --host 127.0.0.1 --port 8000
+uvicorn meta_kpi_calc.crm.webhook_gateway:app --app-dir src --host 127.0.0.1 --port 8765 --no-access-log
+```
+
+Veja [configuração e operação](docs/OPERATIONS.md#fase-3--webhook-independente).
 
 ## Requisitos
 
