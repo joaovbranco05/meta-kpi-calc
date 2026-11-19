@@ -16,3 +16,22 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-ra"
 
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/W: pycodestyle  F: pyflakes  I: isort  UP: pyupgrade  B: flake8-bugbear
+select = ["E", "W", "F", "I", "UP", "B"]
+ignore = [
+    "E501",   # line too long — enforced by formatter, not linter
+    "B008",   # do not perform function calls in default arguments (FastAPI Depends pattern)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["meta_kpi_calc"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
