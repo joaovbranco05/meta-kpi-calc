@@ -62,7 +62,8 @@ def ingest_lead(session: Session, submission: LeadSubmission) -> IngestResult:
     if inserted_id is not None:
         session.flush()
         lead = session.get(Lead, inserted_id)
-        assert lead is not None
+        if lead is None:
+            raise RuntimeError(f"Lead {inserted_id} not found after insert.")
         session.add(LeadActivity(
             lead_id=lead.id,
             activity_type=LeadActivityType.IMPORTED,
