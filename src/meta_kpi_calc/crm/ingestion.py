@@ -9,8 +9,6 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from meta_kpi_calc.db.models import Campaign
-from meta_kpi_calc.db.upsert import insert_for_session
 from meta_kpi_calc.crm.models import (
     Lead,
     LeadActivity,
@@ -18,6 +16,8 @@ from meta_kpi_calc.crm.models import (
     LeadActivityType,
     LeadStatus,
 )
+from meta_kpi_calc.db.models import Campaign
+from meta_kpi_calc.db.upsert import insert_for_session
 
 
 @dataclass(frozen=True)
@@ -104,7 +104,7 @@ def ingest_lead(session: Session, submission: LeadSubmission) -> IngestResult:
 
 
 def change_lead_status(
-    session: Session, lead: Lead, new_status: LeadStatus, *, actor_id: str | None = None
+    session: Session, lead: Lead, new_status: LeadStatus, *, actor_id: str | None = None, actor_user_id: int | None = None
 ) -> Lead:
     if lead.commercial_status == new_status:
         return lead
@@ -115,6 +115,7 @@ def change_lead_status(
         activity_type=LeadActivityType.STATUS_CHANGED,
         actor_type=LeadActivityActor.LOCAL_OPERATOR,
         actor_id=actor_id,
+        actor_user_id=actor_user_id,
         previous_status=previous,
         new_status=new_status,
     ))
@@ -127,6 +128,8 @@ def add_lead_activity(
     lead: Lead,
     activity_type: LeadActivityType,
     note: str | None,
+    *,
+    actor_user_id: int | None = None,
 ) -> LeadActivity:
     if activity_type not in {
         LeadActivityType.NOTE,
@@ -139,6 +142,7 @@ def add_lead_activity(
         activity_type=activity_type,
         actor_type=LeadActivityActor.LOCAL_OPERATOR,
         note=note,
+        actor_user_id=actor_user_id,
     )
     session.add(activity)
     if activity_type == LeadActivityType.CONTACT_MADE:

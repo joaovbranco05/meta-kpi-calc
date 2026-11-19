@@ -10,11 +10,18 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from meta_kpi_calc.api.app import create_app
+from meta_kpi_calc.auth.dependencies import authenticate_session
+from meta_kpi_calc.auth.models import AppUser
 from meta_kpi_calc.core.config import Settings
-from meta_kpi_calc.crm.api import _require_local_peer
 from meta_kpi_calc.crm.import_files import ImportFileError, parse_meta_export
 from meta_kpi_calc.crm.ingestion import LeadSubmission, change_lead_status, ingest_lead
-from meta_kpi_calc.crm.models import Lead, LeadActivity, LeadActivityActor, LeadActivityType, LeadStatus
+from meta_kpi_calc.crm.models import (
+    Lead,
+    LeadActivity,
+    LeadActivityActor,
+    LeadActivityType,
+    LeadStatus,
+)
 
 
 def test_xml_spreadsheet_parser_maps_meta_fields_and_treats_naive_time_as_utc() -> None:
@@ -187,13 +194,18 @@ def test_competing_replays_create_one_lead_and_one_initial_activity(migrated_dat
         assert session.scalar(select(func.count(LeadActivity.id))) == 1
 
 
-def test_crm_api_lists_changes_status_and_rejects_nonlocal_peer(migrated_database) -> None:
+def test_crm_api_lists_and_updates_as_admin(migrated_database) -> None:
     settings, database = migrated_database
     app = create_app(settings)
     app.state.database = database
     with database.session_factory.begin() as session:
         lead = ingest_lead(session, LeadSubmission("api-synthetic-id", {"full_name": "Synthetic"})).lead
         lead_id = lead.id
+        admin = AppUser(issuer="test", subject="admin", role="admin", active=True)
+        session.add(admin)
+        session.flush()
+        admin_id = admin.id
+    app.dependency_overrides[authenticate_session] = lambda: admin_id
     with TestClient(app) as client:
         response = client.get("/api/crm/leads", params={"commercial_status": "NEW"})
         assert response.status_code == 200
@@ -210,8 +222,3 @@ def test_crm_api_lists_changes_status_and_rejects_nonlocal_peer(migrated_databas
         assert client.get(f"/api/crm/leads/{lead_id}/activities").json()[-1]["note"] == "Synthetic note"
         bad = client.post(f"/api/crm/leads/{lead_id}/activities", json={"activity_type": "IMPORTED"})
         assert bad.status_code == 422
-
-    request = type("Request", (), {"client": type("Client", (), {"host": "192.0.2.1"})()})()
-    with pytest.raises(Exception) as error:
-        _require_local_peer(request)
-    assert getattr(error.value, "status_code", None) == 403

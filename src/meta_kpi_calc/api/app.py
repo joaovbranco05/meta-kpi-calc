@@ -5,13 +5,15 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from meta_kpi_calc.api.routes.health import router as health_router
 from meta_kpi_calc.api.routes.rest import router as rest_router
+from meta_kpi_calc.auth.admin import router as admin_router
+from meta_kpi_calc.auth.dependencies import require_admin
 from meta_kpi_calc.core.config import Settings, get_settings
 from meta_kpi_calc.core.logging import configure_logging
 from meta_kpi_calc.crm.api import router as crm_router
@@ -92,6 +94,9 @@ def create_app(
         title=app_settings.app_name,
         version="0.1.0",
         lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
     application.state.settings = app_settings
     application.state.database = Database(app_settings)
@@ -99,7 +104,8 @@ def create_app(
     application.state.sync_service = None
     application.state.scheduler = None
     application.include_router(health_router)
-    application.include_router(rest_router)
+    application.include_router(rest_router, dependencies=[Depends(require_admin)])
+    application.include_router(admin_router)
     application.include_router(crm_router)
 
     @application.exception_handler(RequestValidationError)

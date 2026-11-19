@@ -1,6 +1,6 @@
+import inspect
 from datetime import UTC, date, datetime
 from decimal import Decimal
-import inspect
 from importlib.util import module_from_spec, spec_from_file_location
 from io import BytesIO
 from pathlib import Path
@@ -8,13 +8,12 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+from conftest import create_admin_test_app as create_app
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
-
 from pydantic import SecretStr, ValidationError
 from sqlalchemy import func, select
 
-from meta_kpi_calc.api.app import create_app
 from meta_kpi_calc.api.schemas import EnrollmentWrite
 from meta_kpi_calc.core.config import Settings
 from meta_kpi_calc.db.models import (

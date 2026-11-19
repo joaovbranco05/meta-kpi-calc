@@ -19,6 +19,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from meta_kpi_calc.auth.models import AppUser
 from meta_kpi_calc.db.base import Base
 
 
@@ -104,6 +105,9 @@ class Lead(Base):
         onupdate=func.current_timestamp(),
     )
 
+    assigned_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id"), index=True)
+    assigned_user: Mapped[AppUser | None] = relationship()
+
     campaign = relationship("Campaign", backref="leads")
     activities: Mapped[list[LeadActivity]] = relationship(
         back_populates="lead", order_by="LeadActivity.created_at, LeadActivity.id"
@@ -148,6 +152,7 @@ class LeadActivity(Base):
              create_constraint=False, validate_strings=True, values_callable=_enum_values),
         nullable=False,
     )
+    actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id"))
     actor_id: Mapped[str | None] = mapped_column(String(128))
     previous_status: Mapped[LeadStatus | None] = mapped_column(
         Enum(LeadStatus, name="lead_previous_status", native_enum=False,

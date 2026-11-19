@@ -1,11 +1,11 @@
 import logging
 
 import httpx
+from conftest import create_admin_test_app as create_app
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import select
 
-from meta_kpi_calc.api.app import create_app
 from meta_kpi_calc.core.config import Settings
 from meta_kpi_calc.db.models import Campaign, CampaignInsight, SyncRun
 from meta_kpi_calc.db.session import Database

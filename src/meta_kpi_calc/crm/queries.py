@@ -14,8 +14,14 @@ def list_leads(
     commercial_status: LeadStatus | None = None,
     campaign_id: int | None = None,
     query: str | None = None,
+    assigned_user_id: int | None = None,
+    unassigned: bool = False,
 ) -> tuple[list[Lead], int]:
     predicates = []
+    if assigned_user_id is not None:
+        predicates.append(Lead.assigned_user_id == assigned_user_id)
+    if unassigned:
+        predicates.append(Lead.assigned_user_id.is_(None))
     if commercial_status is not None:
         predicates.append(Lead.commercial_status == commercial_status)
     if campaign_id is not None:

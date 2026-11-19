@@ -12,6 +12,7 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
+import test_authorization
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import URL, make_url
@@ -43,7 +44,7 @@ from test_domain_models import (
 )
 from test_crm import (
     test_idempotent_ingestion_preserves_internal_status_and_records_source_corrections as crm_ingestion,
-    test_crm_api_lists_changes_status_and_rejects_nonlocal_peer as crm_api,
+    test_crm_api_lists_and_updates_as_admin as crm_api,
 )
 from test_api_rest import (
     test_campaign_list_detail_filters_pagination_and_classification as campaign_api,
@@ -100,7 +101,7 @@ def test_schema_and_upgrade_idempotent(pg_database):
     settings, database = pg_database
     with database.engine.connect() as connection:
         assert int(connection.scalar(text("SHOW server_version_num"))) // 10000 == 17
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0006_lead_ads_inbox"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0007_crm_authorization"
     env = os.environ.copy()
     url = make_url(settings.demo_database_url).set(password="synthetic%:password")
     env.update(DEMO_MODE="true", DATABASE_URL=settings.database_url,
@@ -241,3 +242,51 @@ def test_standalone_postgresql_write_failure_returns_503(pg_database):
     assert "webhook_events" not in response.text
     with database.engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM unavailable_inbox")) == 0
+
+
+@pytest.mark.parametrize("check", [
+    test_authorization.test_permissions_and_audit,
+    test_authorization.test_expired_and_inactive_sessions,
+    test_authorization.test_concurrent_admin_deactivation_keeps_one_active,
+])
+def test_authorization_on_postgresql(pg_database, check):
+    check(pg_database)
+
+
+def test_authorization_migration_preserves_postgresql_history(pg_database, tmp_path):
+    settings, database = pg_database
+    env = os.environ.copy()
+    env.update(
+        DEMO_MODE="true",
+        DATABASE_URL=f"sqlite:///{tmp_path / 'unused.db'}",
+        DEMO_DATABASE_URL=settings.active_database_url,
+    )
+
+    def migrate(command, revision):
+        subprocess.run(
+            [sys.executable, "-m", "alembic", command, revision],
+            cwd=Path(__file__).resolve().parents[1],
+            env=env,
+            check=True,
+            capture_output=True,
+        )
+
+    migrate("downgrade", "0006_lead_ads_inbox")
+    with database.engine.begin() as connection:
+        lead_id = connection.scalar(text(
+            "INSERT INTO leads (meta_lead_id, commercial_status) "
+            "VALUES ('legacy-synthetic', 'CONTACTED') RETURNING id"
+        ))
+        connection.execute(text(
+            "INSERT INTO lead_activities (lead_id, activity_type, actor_type, actor_id, note) "
+            "VALUES (:lead_id, 'NOTE', 'LOCAL_OPERATOR', 'legacy-actor', 'Synthetic note')"
+        ), {"lead_id": lead_id})
+    migrate("upgrade", "head")
+    with database.session_factory() as session:
+        lead = session.get(Lead, lead_id)
+        activity, = lead.activities
+        assert lead.commercial_status == LeadStatus.CONTACTED
+        assert lead.assigned_user_id is None
+        assert (activity.actor_id, activity.actor_user_id, activity.note) == (
+            "legacy-actor", None, "Synthetic note"
+        )

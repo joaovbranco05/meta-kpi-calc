@@ -13,15 +13,16 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import MetaData, create_engine, func, select, text
 from sqlalchemy.engine import make_url
 
-from meta_kpi_calc.db.base import Base
-from meta_kpi_calc.db import models  # noqa: F401
-from meta_kpi_calc.crm import models as crm_models  # noqa: F401
 from meta_kpi_calc.crm import inbox_models  # noqa: F401
+from meta_kpi_calc.crm import models as crm_models  # noqa: F401
+from meta_kpi_calc.db import models  # noqa: F401
+from meta_kpi_calc.db.base import Base
 
-REVISION = "0006_lead_ads_inbox"
+LEGACY_REVISION = "0006_lead_ads_inbox"
+REVISION = "0007_crm_authorization"
 
 
 def _normalized(value):
@@ -52,11 +53,21 @@ def migrate_snapshot(source: Path, target_engine, *, execute: bool = False) -> d
     source_engine = create_engine("sqlite://", creator=lambda: sqlite3.connect(source_uri, uri=True))
     try:
         with source_engine.connect() as src, target_engine.begin() as dst:
-            if src.scalar(text("SELECT version_num FROM alembic_version")) != REVISION:
+            revision = src.scalar(text("SELECT version_num FROM alembic_version"))
+            if revision not in {LEGACY_REVISION, REVISION}:
                 raise ValueError("Source schema revision is not supported")
-            if dst.scalar(text("SELECT version_num FROM alembic_version")) != REVISION:
+            if dst.scalar(text("SELECT version_num FROM alembic_version")) != revision:
                 raise ValueError("Destination schema revision is not supported")
-            tables = Base.metadata.sorted_tables
+            metadata = Base.metadata
+            if revision == LEGACY_REVISION:
+                metadata = MetaData()
+                metadata.reflect(
+                    bind=dst,
+                    only=lambda name, _: name != "alembic_version" and name in Base.metadata.tables,
+                )
+            elif src.scalar(text("SELECT count(*) FROM app_sessions")):
+                raise ValueError("Snapshots containing application sessions are not supported")
+            tables = metadata.sorted_tables
             counts = {}
             for table in tables:
                 if dst.scalar(select(func.count()).select_from(table)):

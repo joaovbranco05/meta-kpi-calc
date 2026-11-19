@@ -43,7 +43,7 @@ def test_alembic_domain_schema_is_persisted_and_reversible(tmp_path: Path) -> No
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-    assert revision == ("0006_lead_ads_inbox",)
+    assert revision == ("0007_crm_authorization",)
     assert "qualified_leads" in columns
     assert {
         "campaigns",
@@ -140,7 +140,7 @@ def test_lead_ads_migration_preserves_phase_one_rows_and_matches_metadata(tmp_pa
     run_alembic(project_root, database, "upgrade", "head")
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT meta_lead_id, commercial_status, meta_page_id FROM leads").fetchone() == ("synthetic-migration-id", "CONTACTED", None)
-        assert connection.execute("SELECT note FROM lead_activities").fetchone() == ("Synthetic note",)
+        assert connection.execute("SELECT note, actor_user_id FROM lead_activities").fetchone() == ("Synthetic note", None)
         assert {"webhook_events", "lead_reconciliation_states"} <= {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     # A clean metadata comparison is a separate guarantee from successful DDL.
     environment = os.environ.copy()

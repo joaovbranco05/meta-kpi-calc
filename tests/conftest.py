@@ -56,3 +56,14 @@ def migrated_database(tmp_path: Path) -> Iterator[tuple[Settings, Database]]:
         yield settings, database
     finally:
         database.engine.dispose()
+
+
+def create_admin_test_app(*args, **kwargs):
+    """Isolate pre-existing Analytics tests from authentication setup."""
+    from meta_kpi_calc.api.app import create_app
+    from meta_kpi_calc.auth.dependencies import current_user
+    from meta_kpi_calc.auth.models import AppUser
+
+    app = create_app(*args, **kwargs)
+    app.dependency_overrides[current_user] = lambda: AppUser(id=1, role="admin", active=True)
+    return app

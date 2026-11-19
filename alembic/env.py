@@ -2,14 +2,15 @@
 
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from alembic import context
+from meta_kpi_calc.auth import models as auth_models  # noqa: F401
 from meta_kpi_calc.core.config import get_settings
-from meta_kpi_calc.db.base import Base
-from meta_kpi_calc.db import models  # noqa: F401  # Register model metadata.
-from meta_kpi_calc.crm import models as crm_models  # noqa: F401
 from meta_kpi_calc.crm import inbox_models  # noqa: F401
+from meta_kpi_calc.crm import models as crm_models  # noqa: F401
+from meta_kpi_calc.db import models  # noqa: F401  # Register model metadata.
+from meta_kpi_calc.db.base import Base
 
 config = context.config
 if config.config_file_name is not None:
