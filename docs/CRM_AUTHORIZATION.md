@@ -25,7 +25,7 @@ atual depende da integração da fase 4B para acessá-las.
    localizada pelo emissor canônico e subject, com provisionamento explícito.
 2. O servidor emite um token aleatório de 32 bytes codificado como base64url,
    guarda apenas seu SHA-256 no PostgreSQL e envia o token em cookie
-   `rctec_session`, HttpOnly, Secure em produção e SameSite=Lax, com prazo
+   `__Host-rctec_session`, HttpOnly, Secure em produção e SameSite=Lax, com prazo
    definido. A UI e os caminhos de login/logout ficam na mesma origem.
 3. O Streamlit encaminha somente o cookie de sessão à API privada no servidor,
    sem gravá-lo em logs ou caches compartilhados. O FastAPI consulta a sessão
@@ -90,3 +90,92 @@ principal nesta fase.
   borda, API e Streamlit.
 - Validar em navegador login, logout, troca de conta, abas antigas, reconexão
   e downloads após revogação.
+
+
+## Fase 4B — execução e ativação
+
+A migration `0008_oidc_flows` cria transações de login de uso único e registra
+mudanças de conta que invalidam logins já iniciados. Configure as quatro
+variáveis OIDC do `.env.example` somente no serviço FastAPI. Com elas ausentes
+ou em modo demo, login e callback ficam indisponíveis. Guarde o segredo no
+ambiente privado. Use um cliente Workspace interno e cadastre exatamente
+`https://<origem-do-crm>/auth/callback`. Configure uma origem HTTPS sem caminho.
+
+A borda HTTPS encaminha somente `GET /auth/login`, `GET /auth/callback` e
+`GET/POST /auth/logout` ao FastAPI. Bloqueie externamente `/api/*`,
+`/auth/session`, `/health` e quaisquer outras rotas FastAPI. O restante
+segue para o Streamlit, incluindo o upgrade WebSocket. A API fica em rede
+privada e `API_BASE_URL` no Streamlit aponta para essa rede. Restrinja o
+host da borda ao domínio esperado e preserve o Origin. Não sobrescreva
+`Referrer-Policy: same-origin` na página de confirmação de logout, pois a
+política `no-referrer` pode fazer o navegador enviar Origin nulo no POST.
+O webhook continua em entrada e serviço separados.
+
+O cookie `__Host-rctec_session` usa Path=/, Secure, HttpOnly, SameSite=Lax
+e não tem Domain. Ao iniciar uma conexão, o Streamlit encaminha apenas esse
+cookie para o FastAPI e acrescenta o token de CSRF às suas chamadas de
+escrita. A sessão é reavaliada a cada chamada e a interface verifica abas
+ociosas a cada 15 segundos quando o navegador executa o timer. Logout ou
+troca bem-sucedida de conta revoga a sessão anterior. Dados já entregues
+ao navegador ou baixados não podem ser recolhidos.
+
+Na borda e no Uvicorn, desative logs de acesso que incluam querystrings e
+cabeçalhos sensíveis. Inicie o Uvicorn com `--no-access-log` e mantenha
+logs HTTP de depuração desativados. Aplique limites de requisição na borda
+às rotas de login e callback. Remova transações expiradas por rotina
+operacional se necessário e defina retenção para sessões expiradas.
+Valide emissão, logout e troca de conta com o HTTPS e o proxy definitivos
+antes de liberar usuários.
+
+### Primeiro administrador
+
+1. Autorize explicitamente a pessoa responsável. Em ambiente de
+   provisionamento controlado, obtenha o `sub` de uma identidade Google
+   verificada para o cliente e domínio aprovados. Valide assinatura, emissor,
+   audiência, expiração, nonce e `hd`. Use o emissor canônico
+   `https://accounts.google.com`. Guarde apenas o par de identidade, nunca
+   o token ou um endereço de e-mail como chave. A tela de login comum
+   rejeita identidades ainda não cadastradas.
+2. Um operador de banco autorizado abre uma transação READ COMMITTED,
+   usa o mesmo bloqueio `pg_advisory_xact_lock(718503120464)` das alterações
+   de conta e confirma que a instalação ainda não recebeu o primeiro
+   administrador. Insere a conta ativa com o par verificado e perfil
+   `admin`, usando parâmetros SQL e os constraints de unicidade.
+3. Na mesma transação, registre `bootstrap_admin` em `admin_audit` com o
+   ID criado em `actor_user_id` e `target_user_id` e `new_value='admin'`.
+   Esse autor é convencional para bootstrap, pois ainda não há sessão
+   administrativa. Registre quem autorizou e quem executou em um registro
+   operacional separado, sem credenciais. Revise a inserção antes do commit.
+4. O administrador se autentica pelo Google para obter a primeira sessão.
+   Criar a conta não gera cookie. Use procedimento de recuperação separado
+   se já existir um administrador provisionado.
+
+Além dos privilégios da 4A.1, o papel da API precisa de INSERT em
+`app_sessions` e SELECT/INSERT/DELETE em `oidc_flows`, sem DDL. Use um papel
+operacional separado para CLIs de status, reconciliação e manutenção, com
+acesso explícito às tabelas necessárias em cada operação.
+
+Exemplo de roteamento Caddy para revisão antes da ativação. Troque os nomes
+dos serviços pelos endereços privados do ambiente. Preserve os controles
+de origem e XSRF do Streamlit.
+
+```caddyfile
+crm.example.invalid {
+    @auth_get {
+        method GET
+        path /auth/login /auth/callback /auth/logout
+    }
+    @auth_post {
+        method POST
+        path /auth/logout
+    }
+    @private path /api /api/* /auth /auth/* /health /docs /redoc /openapi.json
+
+    route {
+        reverse_proxy @auth_get fastapi:8000
+        reverse_proxy @auth_post fastapi:8000
+        respond @private 404
+        reverse_proxy streamlit:8501
+    }
+}
+```

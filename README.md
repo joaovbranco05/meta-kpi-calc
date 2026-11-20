@@ -196,11 +196,17 @@ Ele grava na inbox compartilhada com o worker e responde apenas após o commit.
 API administrativa e webhook são processos independentes, iniciados em terminais separados:
 
 ```bash
-uvicorn meta_kpi_calc.api.app:app --app-dir src --host 127.0.0.1 --port 8000
+uvicorn meta_kpi_calc.api.app:app --app-dir src --host 127.0.0.1 --port 8000 --no-access-log
 uvicorn meta_kpi_calc.crm.webhook_gateway:app --app-dir src --host 127.0.0.1 --port 8765 --no-access-log
 ```
 
 Veja [configuração e operação](docs/OPERATIONS.md#fase-3--webhook-independente).
+
+### Fase 4B — login corporativo
+
+O login OIDC depende de uma origem HTTPS para Streamlit e rotas de login,
+com a API de dados em rede privada. Veja [autorização, configuração e
+provisionamento](docs/CRM_AUTHORIZATION.md#fase-4b--execução-e-ativação).
 
 ## Requisitos
 
@@ -224,11 +230,10 @@ de integração real for iniciada; o endpoint atual funciona sem credenciais.
 ## Execução
 
 ```bash
-uvicorn meta_kpi_calc.api.app:app --app-dir src --host 127.0.0.1 --port 8000
+uvicorn meta_kpi_calc.api.app:app --app-dir src --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
-Verifique `http://127.0.0.1:8000/health` ou a documentação em
-`http://127.0.0.1:8000/docs`.
+Verifique `http://127.0.0.1:8000/health` pela rede privada.
 
 ## Testes
 
@@ -422,16 +427,15 @@ exportação e campos brutos da Meta não aparecem.
 Com a API em execução, inicie o painel local:
 
 ```bash
-streamlit run frontend/app.py
+PYTHONPATH=src streamlit run frontend/app.py
 ```
 
 O painel usa exclusivamente `API_BASE_URL` (por padrão
-`http://127.0.0.1:8000`), abre no período existente do demo quando há Insights
+`http://127.0.0.1:8000`), abre no período disponível quando há Insights
 e aplica filtros somente após **Aplicar filtros**. A visão geral organiza mídia,
 comercial e financeiro, explica cada KPI e mostra cobertura, pendências e
 inconsistências. A exportação XLSX usa o mesmo recorte exibido e invalida o
-arquivo preparado se os filtros mudarem. O painel mostra um banner em
-demonstração e trata API vazia ou indisponível sem exibir traceback. Ele só
+arquivo preparado se os filtros mudarem. O painel exige uma sessão válida e trata API vazia ou indisponível sem exibir traceback. Ele só
 consulta a Meta quando o operador usa **Testar conexão Meta** ou
 **Sincronizar período filtrado**; não lê SQLite diretamente.
 

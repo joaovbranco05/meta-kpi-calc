@@ -39,7 +39,7 @@ STREAMLIT_PID_FILE="$ROOT_DIR/.logs/streamlit.pid"
 if [ -f "$API_PID_FILE" ] && kill -0 "$(cat "$API_PID_FILE")" 2>/dev/null; then
   echo "API já está em execução (PID $(cat "$API_PID_FILE"))."
 else
-  nohup uvicorn meta_kpi_calc.api.app:app --app-dir src --host 127.0.0.1 --port 8000 >"$API_LOG" 2>&1 &
+  nohup uvicorn meta_kpi_calc.api.app:app --app-dir src --host 127.0.0.1 --port 8000 --no-access-log >"$API_LOG" 2>&1 &
   echo $! > "$API_PID_FILE"
   echo "API iniciada em http://127.0.0.1:8000"
 fi

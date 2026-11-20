@@ -29,6 +29,7 @@ class AppUser(Base):
     subject: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(16))
     active: Mapped[bool] = mapped_column(Boolean)
+    auth_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AppSession(Base):
@@ -53,3 +54,13 @@ class AdminAudit(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.current_timestamp()
     )
+
+
+class OIDCFlow(Base):
+    __tablename__ = "oidc_flows"
+
+    state_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    browser_digest: Mapped[str] = mapped_column(String(64))
+    verifier: Mapped[str] = mapped_column(String(43))
+    nonce: Mapped[str] = mapped_column(String(43))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

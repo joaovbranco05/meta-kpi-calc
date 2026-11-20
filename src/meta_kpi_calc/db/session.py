@@ -24,6 +24,7 @@ def create_sqlite_engine(settings: Settings) -> Engine:
     engine = create_engine(
         database_url,
         connect_args={"check_same_thread": False},
+        hide_parameters=True,
         pool_pre_ping=True,
     )
 

@@ -1,5 +1,7 @@
 """Small local Streamlit panel that talks exclusively to the REST API."""
 
+import base64
+import hashlib
 import os
 import re
 from datetime import date, timedelta
@@ -7,6 +9,8 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+
+from meta_kpi_calc.auth.dependencies import SESSION_COOKIE
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 EFFECTIVE_STATUS_OPTIONS = ("", "ACTIVE", "PAUSED", "ARCHIVED", "DELETED", "DISABLED")
@@ -696,12 +700,7 @@ def _compare_campaigns(st: Any, client: httpx.Client, filters: dict[str, str]) -
             st.session_state["comparison_export"] = response.content
             st.session_state["comparison_export_scope"] = export_scope
     if report := st.session_state.get("comparison_export"):
-        st.download_button(
-            "Baixar comparação XLSX",
-            data=report,
-            file_name="meta-kpi-comparacao.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        _download_xlsx(report, "meta-kpi-comparacao.xlsx", "Baixar comparação XLSX")
 
 
 def _set_enrollment_form_values(st: Any, record: dict[str, Any] | None, campaign: dict[str, Any]) -> None:
@@ -1041,12 +1040,21 @@ def _export(st: Any, client: httpx.Client, filters: dict[str, str]) -> None:
             st.session_state["report_export"] = response.content
             st.session_state["report_export_filters"] = dict(filters)
     if report := st.session_state.get("report_export"):
-        st.download_button(
-            "Baixar relatório XLSX",
-            data=report,
-            file_name="meta-kpi-report.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        _download_xlsx(report, "meta-kpi-report.xlsx", "Baixar relatório XLSX")
+
+
+def _download_xlsx(content: bytes, filename: str, label: str) -> None:
+    from html import escape
+
+    from streamlit.components.v1 import html
+
+    data = base64.b64encode(content).decode("ascii")
+    html(
+        '<a download="' + escape(filename, quote=True)
+        + '" href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,'
+        + data + '">' + escape(label) + "</a>",
+        height=34,
+    )
 
 
 def _export_is_current(st: Any, filters: dict[str, str]) -> bool:
@@ -1056,12 +1064,67 @@ def _export_is_current(st: Any, filters: dict[str, str]) -> bool:
     )
 
 
+def _login_screen(st: Any) -> None:
+    st.session_state.clear()
+    st.html('<a href="/auth/login" target="_self">Entrar com Google Workspace</a>')
+
+
+def _auth_headers(token: str) -> dict[str, str]:
+    if not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
+        return {}
+    return {"Cookie": f"{SESSION_COOKIE}={token}"}
+
+
 def main() -> None:
     import streamlit as st
 
     st.set_page_config(page_title="Meta KPI Calculator", layout="wide")
     st.title("Meta KPI Calculator")
-    with httpx.Client() as client:
+    token = st.context.cookies.get(SESSION_COOKIE, "")
+    headers = _auth_headers(token)
+    if not headers:
+        _login_screen(st)
+        return
+
+    session_fingerprint = hashlib.sha256(token.encode()).hexdigest()
+
+    @st.fragment(run_every="15s")
+    def check_session():
+        with httpx.Client(headers=headers, trust_env=False) as checker:
+            active = _request(checker, "GET", "/auth/session")
+        if not active or (active["id"], active["role"], session_fingerprint) != st.session_state.get("identity"):
+            st.session_state.clear()
+            st.rerun()
+
+    def on_response(response):
+        if response.status_code == 401 and response.request.url.path != "/auth/session":
+            st.session_state.clear()
+            st.rerun()
+
+    with httpx.Client(headers=headers, trust_env=False, event_hooks={"response": [on_response]}) as client:
+        identity = _request(client, "GET", "/auth/session")
+        if not identity:
+            _login_screen(st)
+            return
+        fingerprint = (identity["id"], identity["role"], session_fingerprint)
+        if st.session_state.get("identity") != fingerprint:
+            st.session_state.clear()
+            st.session_state["identity"] = fingerprint
+        client.headers["X-CSRF-Token"] = identity["csrf"]
+        st.html('<a href="/auth/logout" target="_self">Sair</a> · '
+                '<a href="/auth/login" target="_self">Trocar conta</a>')
+        check_session()
+        if identity["role"] == "usuario":
+            page = _request(client, "GET", "/api/crm/leads")
+            st.subheader("Meus leads")
+            if page and page["items"]:
+                st.dataframe([
+                    {"Nome": item["full_name"], "Status": item["commercial_status"]}
+                    for item in page["items"]
+                ])
+            else:
+                st.info("Nenhum lead disponível.")
+            return
         health = _request(client, "GET", "/health")
         if health and health.get("mode") == "demo":
             st.info("Modo demonstração: os dados exibidos são fictícios.")

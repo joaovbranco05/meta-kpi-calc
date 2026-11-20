@@ -32,6 +32,12 @@ def redact_text(value: str, secrets: Sequence[str] = ()) -> str:
     )
     redacted = re.sub(r'(?i)(hub(?:\.|%2e)verify_token(?:=|%3d))[^\s&"\']*',
                       rf"\1{REDACTED}", redacted)
+    redacted = re.sub(r"(/auth/(?:callback|login))\?[^\s\"'<>]*", r"\1?[REDACTED]", redacted)
+    redacted = re.sub(
+        r"(?i)((?:__Host-)?rctec_(?:session|oidc)\s*=)[^;\s,\"']+",
+        rf"\1{REDACTED}",
+        redacted,
+    )
     for secret in secrets:
         if secret:
             redacted = redacted.replace(secret, REDACTED)
@@ -103,7 +109,7 @@ def configure_logging(settings: Settings) -> None:
     root = logging.getLogger()
     secrets = tuple(value.get_secret_value() for value in (
         settings.meta_access_token, settings.lead_ads_access_token,
-        settings.lead_ads_app_secret, settings.lead_ads_verify_token,
+        settings.lead_ads_app_secret, settings.lead_ads_verify_token, settings.oidc_client_secret,
     ) if value is not None)
 
     for handler in list(root.handlers):

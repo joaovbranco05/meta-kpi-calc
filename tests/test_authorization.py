@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from meta_kpi_calc.api.app import create_app
-from meta_kpi_calc.auth.dependencies import SESSION_COOKIE
+from meta_kpi_calc.auth.dependencies import SESSION_COOKIE, csrf_token
 from meta_kpi_calc.auth.models import AdminAudit, AppSession, AppUser
 from meta_kpi_calc.crm.ingestion import LeadSubmission, ingest_lead
 from meta_kpi_calc.crm.models import LeadActivity
@@ -34,6 +34,7 @@ def _account(session, role, subject):
 
 def _login(client, account):
     client.cookies.set(SESSION_COOKIE, account[1])
+    client.headers["X-CSRF-Token"] = csrf_token(account[1])
 
 
 def test_permissions_and_audit(migrated_database):

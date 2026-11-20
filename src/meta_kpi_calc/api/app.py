@@ -14,6 +14,7 @@ from meta_kpi_calc.api.routes.health import router as health_router
 from meta_kpi_calc.api.routes.rest import router as rest_router
 from meta_kpi_calc.auth.admin import router as admin_router
 from meta_kpi_calc.auth.dependencies import require_admin
+from meta_kpi_calc.auth.routes import router as auth_router
 from meta_kpi_calc.core.config import Settings, get_settings
 from meta_kpi_calc.core.logging import configure_logging
 from meta_kpi_calc.crm.api import router as crm_router
@@ -38,6 +39,7 @@ def create_app(
     settings: Settings | None = None,
     *,
     http_client: httpx.Client | None = None,
+    oidc_transport: httpx.BaseTransport | None = None,
 ) -> FastAPI:
     """Create an app whose dependencies can be replaced safely in tests."""
     app_settings = settings or get_settings()
@@ -99,6 +101,7 @@ def create_app(
         openapi_url=None,
     )
     application.state.settings = app_settings
+    application.state.oidc_transport = oidc_transport
     application.state.database = Database(app_settings)
     application.state.meta_client = None
     application.state.sync_service = None
@@ -106,7 +109,16 @@ def create_app(
     application.include_router(health_router)
     application.include_router(rest_router, dependencies=[Depends(require_admin)])
     application.include_router(admin_router)
+    application.include_router(auth_router)
     application.include_router(crm_router)
+
+    @application.middleware("http")
+    async def prevent_auth_caching(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/auth/"):
+            response.headers["Cache-Control"] = "no-store"
+            response.headers.setdefault("Referrer-Policy", "no-referrer")
+        return response
 
     @application.exception_handler(RequestValidationError)
     async def validation_error(

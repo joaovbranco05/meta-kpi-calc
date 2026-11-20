@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     lead_ads_worker_backoff_base_seconds: float = Field(default=5, ge=0.1, le=3600, allow_inf_nan=False)
     lead_ads_worker_backoff_max_seconds: float = Field(default=300, ge=0.1, le=86400, allow_inf_nan=False)
 
+    oidc_client_id: str | None = None
+    oidc_client_secret: SecretStr | None = None
+    oidc_workspace_domain: str | None = None
+    oidc_public_origin: HttpUrl | None = None
+    oidc_session_minutes: int = Field(default=60, ge=5, le=480)
+
     scheduler_enabled: bool = False
     sync_interval_minutes: int = Field(default=60, gt=0)
     sync_lookback_days: int = Field(default=7, ge=1)
@@ -153,6 +159,17 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_relationships(self) -> "Settings":
+        if any((self.oidc_client_id, self.oidc_client_secret, self.oidc_workspace_domain, self.oidc_public_origin)):
+            origin = self.oidc_public_origin
+            if not (
+                self.oidc_client_id and self.oidc_client_id.strip()
+                and self.oidc_client_secret and self.oidc_client_secret.get_secret_value().strip()
+                and self.oidc_workspace_domain
+                and re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+", self.oidc_workspace_domain)
+                and origin and origin.scheme == "https" and origin.path in ("/", None)
+                and not any((origin.username, origin.password, origin.query, origin.fragment))
+            ):
+                raise ValueError("OIDC requires complete configuration and an HTTPS origin")
         if self.lead_ads_retry_base_seconds > self.lead_ads_retry_max_seconds:
             raise ValueError("Lead Ads retry policy is invalid")
         if self.lead_ads_worker_backoff_base_seconds > self.lead_ads_worker_backoff_max_seconds:

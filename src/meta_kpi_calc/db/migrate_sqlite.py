@@ -22,7 +22,8 @@ from meta_kpi_calc.db import models  # noqa: F401
 from meta_kpi_calc.db.base import Base
 
 LEGACY_REVISION = "0006_lead_ads_inbox"
-REVISION = "0007_crm_authorization"
+AUTH_REVISION = "0007_crm_authorization"
+REVISION = "0008_oidc_flows"
 
 
 def _normalized(value):
@@ -54,19 +55,21 @@ def migrate_snapshot(source: Path, target_engine, *, execute: bool = False) -> d
     try:
         with source_engine.connect() as src, target_engine.begin() as dst:
             revision = src.scalar(text("SELECT version_num FROM alembic_version"))
-            if revision not in {LEGACY_REVISION, REVISION}:
+            if revision not in {LEGACY_REVISION, AUTH_REVISION, REVISION}:
                 raise ValueError("Source schema revision is not supported")
             if dst.scalar(text("SELECT version_num FROM alembic_version")) != revision:
                 raise ValueError("Destination schema revision is not supported")
             metadata = Base.metadata
-            if revision == LEGACY_REVISION:
+            if revision != LEGACY_REVISION and src.scalar(text("SELECT count(*) FROM app_sessions")):
+                raise ValueError("Snapshots containing application sessions are not supported")
+            if revision == REVISION and src.scalar(text("SELECT count(*) FROM oidc_flows")):
+                raise ValueError("Snapshots containing login transactions are not supported")
+            if revision != REVISION:
                 metadata = MetaData()
                 metadata.reflect(
                     bind=dst,
                     only=lambda name, _: name != "alembic_version" and name in Base.metadata.tables,
                 )
-            elif src.scalar(text("SELECT count(*) FROM app_sessions")):
-                raise ValueError("Snapshots containing application sessions are not supported")
             tables = metadata.sorted_tables
             counts = {}
             for table in tables:

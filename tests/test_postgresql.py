@@ -101,7 +101,7 @@ def test_schema_and_upgrade_idempotent(pg_database):
     settings, database = pg_database
     with database.engine.connect() as connection:
         assert int(connection.scalar(text("SHOW server_version_num"))) // 10000 == 17
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0007_crm_authorization"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0008_oidc_flows"
     env = os.environ.copy()
     url = make_url(settings.demo_database_url).set(password="synthetic%:password")
     env.update(DEMO_MODE="true", DATABASE_URL=settings.database_url,
@@ -487,3 +487,16 @@ def test_service_roles_with_minimum_grants(pg_database, tmp_path):
             assert denied.value.orig.sqlstate == "42501"
         finally:
             restricted.engine.dispose()
+
+
+@pytest.mark.parametrize("active", [True, False])
+def test_oidc_account_change_concurrency_on_postgresql(pg_database, active):
+    from test_oidc import test_session_issuance_races_account_change
+
+    test_session_issuance_races_account_change(pg_database, active)
+
+
+def test_oidc_callback_and_logout_on_postgresql(pg_database):
+    from test_oidc import test_login_csrf_expiry_logout_and_replay
+
+    test_login_csrf_expiry_logout_and_replay(pg_database)
