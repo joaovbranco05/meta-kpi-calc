@@ -290,3 +290,200 @@ def test_authorization_migration_preserves_postgresql_history(pg_database, tmp_p
         assert (activity.actor_id, activity.actor_user_id, activity.note) == (
             "legacy-actor", None, "Synthetic note"
         )
+
+
+@pytest.mark.parametrize("check", [
+    test_authorization.test_profile_changes_revoke_all_existing_sessions,
+    test_authorization.test_administrative_audit_failure_rolls_back,
+])
+def test_authorization_hardening_on_postgresql(pg_database, check):
+    check(pg_database)
+
+
+@pytest.mark.parametrize("operation", ["history", "status", "note"])
+def test_reassignment_commits_before_scoped_operation(pg_database, operation):
+    from threading import Event
+
+    from fastapi.testclient import TestClient
+    from sqlalchemy import event
+
+    from meta_kpi_calc.api.app import create_app
+
+    settings, database = pg_database
+    app = create_app(settings)
+    with database.session_factory.begin() as session:
+        admin = test_authorization._account(session, "admin", "admin")
+        operator = test_authorization._account(session, "usuario", "operator")
+        other = test_authorization._account(session, "usuario", "other")
+        lead = ingest_lead(session, LeadSubmission("123", {})).lead
+        lead.assigned_user_id = operator[0]
+        path = f"/api/crm/leads/{lead.id}"
+    waiting, resume = Event(), Event()
+
+    def pause_before_statement(_conn, _cursor, sql, *_args):
+        sql = sql.lower()
+        scoped = "left outer join lead_activities" in sql if operation == "history" else sql.startswith("update leads")
+        if scoped:
+            waiting.set()
+            assert resume.wait(10)
+
+    event.listen(app.state.database.engine, "before_cursor_execute", pause_before_statement)
+    try:
+        with TestClient(app) as caller, TestClient(create_app(settings)) as administrator:
+            test_authorization._login(caller, operator)
+            test_authorization._login(administrator, admin)
+            calls = {
+                "history": ("GET", "/activities", {}),
+                "status": ("PATCH", "/status", {"json": {"commercial_status": "LOST"}}),
+                "note": ("POST", "/activities", {"json": {"activity_type": "NOTE", "note": "Synthetic"}}),
+            }
+            method, suffix, kwargs = calls[operation]
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(caller.request, method, path + suffix, **kwargs)
+                try:
+                    assert waiting.wait(10)
+                    assert administrator.patch(path + "/assignment", json={"assigned_user_id": other[0]}).status_code == 200
+                finally:
+                    resume.set()
+                response = future.result(timeout=10)
+            assert response.status_code == 404
+    finally:
+        app.state.database.engine.dispose()
+    with database.session_factory() as session:
+        assert session.scalar(select(Lead.commercial_status)) == LeadStatus.NEW
+        assert session.scalar(select(func.count()).select_from(LeadActivity)) == 1
+
+
+def test_admin_rejects_unsupported_transaction_isolation(pg_database):
+    from fastapi.testclient import TestClient
+
+    from meta_kpi_calc.api.app import create_app
+
+    settings, database = pg_database
+    with database.engine.connect() as connection:
+        assert connection.get_isolation_level() == "READ COMMITTED"
+    with database.session_factory.begin() as session:
+        admin = test_authorization._account(session, "admin", "admin")
+    app = create_app(settings)
+    app.state.database.engine.update_execution_options(isolation_level="REPEATABLE READ")
+    try:
+        with TestClient(app) as client:
+            test_authorization._login(client, admin)
+            response = client.put(f"/api/admin/users/{admin[0]}", json={"role": "usuario", "active": True})
+            assert response.status_code == 503
+    finally:
+        app.state.database.engine.dispose()
+
+
+def test_service_roles_with_minimum_grants(pg_database, tmp_path):
+    import httpx
+    from fastapi.testclient import TestClient
+    from sqlalchemy.exc import ProgrammingError
+    from test_lead_ads import graph, notification, options, payload, signed
+
+    from meta_kpi_calc.api.app import create_app
+    from meta_kpi_calc.crm.ingestion import SOURCE_FIELDS
+    from meta_kpi_calc.crm.processing import process_events
+    from meta_kpi_calc.crm.webhook_gateway import create_webhook_gateway_app
+
+    settings, database = pg_database
+    suffix = uuid4().hex
+    owner, api, hook, worker = (f"test_{name}_{suffix}" for name in ("ddl", "api", "hook", "worker"))
+
+    def as_role(role):
+        url = make_url(settings.active_database_url)
+        url = url.update_query_dict({"options": f"-c role={role}"})
+        return settings.model_copy(update={"demo_database_url": url.render_as_string(hide_password=False)})
+
+    def migrate(config, command, revision):
+        env = dict(os.environ, DEMO_MODE="true",
+                   DATABASE_URL=f"sqlite:///{tmp_path / 'unused.db'}",
+                   DEMO_DATABASE_URL=config.active_database_url)
+        subprocess.run([sys.executable, "-m", "alembic", command, revision],
+                       cwd=Path(__file__).resolve().parents[1], env=env, check=True, capture_output=True)
+
+    migrate(settings, "downgrade", "base")
+    with database.engine.begin() as connection:
+        connection.execute(text("DROP TABLE alembic_version"))
+        for role in (owner, api, hook, worker):
+            connection.execute(text(f"CREATE ROLE {role} NOLOGIN"))
+        connection.execute(text(f"GRANT USAGE, CREATE ON SCHEMA public TO {owner}"))
+        connection.execute(text(f"GRANT USAGE ON SCHEMA public TO {api}, {hook}, {worker}"))
+
+    migrate(as_role(owner), "upgrade", "head")
+    with database.engine.begin() as connection:
+        grants = (
+            f"GRANT SELECT, INSERT, UPDATE ON app_users TO {api}",
+            f"GRANT SELECT ON app_sessions TO {api}",
+            f"GRANT UPDATE (revoked_at) ON app_sessions TO {api}",
+            f"GRANT INSERT ON admin_audit TO {api}",
+            f"GRANT SELECT (id, created_at) ON admin_audit TO {api}",
+            f"GRANT SELECT ON leads, lead_activities, campaigns, campaign_insights, enrollment_records, commercial_closures, sync_runs TO {api}",
+            f"GRANT INSERT, UPDATE ON campaigns, campaign_insights, enrollment_records, commercial_closures, sync_runs TO {api}",
+            f"GRANT UPDATE (commercial_status, last_contact_at, assigned_user_id, updated_at) ON leads TO {api}",
+            f"GRANT INSERT ON lead_activities TO {api}",
+            f"GRANT USAGE ON SEQUENCE app_users_id_seq, admin_audit_id_seq, lead_activities_id_seq, campaigns_id_seq, campaign_insights_id_seq, enrollment_records_id_seq, commercial_closures_id_seq, sync_runs_id_seq TO {api}",
+            f"GRANT INSERT (dedup_key, meta_lead_id, meta_page_id, meta_form_id, meta_ad_id) ON webhook_events TO {hook}",
+            f"GRANT SELECT (dedup_key) ON webhook_events TO {hook}",
+            f"GRANT USAGE ON SEQUENCE webhook_events_id_seq TO {hook}",
+            f"GRANT SELECT ON webhook_events TO {worker}",
+            f"GRANT UPDATE (status, attempts, lease_token, lease_expires_at, updated_at, error_code, completed_at, unmapped_fields, next_attempt_at) ON webhook_events TO {worker}",
+            f"GRANT SELECT ON leads, campaigns TO {worker}",
+            f"GRANT INSERT ({', '.join((*SOURCE_FIELDS, 'campaign_id', 'meta_lead_id', 'commercial_status'))}) ON leads TO {worker}",
+            f"GRANT UPDATE ({', '.join((*SOURCE_FIELDS, 'campaign_id', 'updated_at'))}) ON leads TO {worker}",
+            f"GRANT INSERT ON lead_activities TO {worker}",
+            f"GRANT SELECT (id, created_at) ON lead_activities TO {worker}",
+            f"GRANT USAGE ON SEQUENCE leads_id_seq, lead_activities_id_seq TO {worker}",
+        )
+        for grant in grants:
+            connection.execute(text(grant))
+
+    with database.session_factory.begin() as session:
+        admin = test_authorization._account(session, "admin", "admin")
+
+    def ingress_config(role):
+        role_settings = as_role(role)
+        return options(role_settings).model_copy(update={"database_url": role_settings.active_database_url})
+
+    with TestClient(create_webhook_gateway_app(ingress_config(hook))) as client:
+        for _ in range(2):
+            assert client.post("/webhooks/meta/lead-ads", **signed(notification())).status_code == 200
+
+    worker_config = ingress_config(worker)
+    worker_db = Database(worker_config)
+    try:
+        result = process_events(worker_db.session_factory,
+                                graph(lambda _: httpx.Response(200, json=payload())), worker_config)
+        assert result["completed"] == 1
+    finally:
+        worker_db.engine.dispose()
+    with TestClient(create_app(as_role(api))) as client:
+        test_authorization._login(client, admin)
+        leads = client.get("/api/crm/leads").json()
+        assert leads["total"] == 1
+        assert client.patch(f"/api/crm/leads/{leads['items'][0]['id']}/assignment",
+                            json={"assigned_user_id": admin[0]}).status_code == 200
+        created = client.post("/api/admin/users", json={"issuer": "test", "subject": "new", "role": "usuario"})
+        assert created.status_code == 201
+        endpoint = f"/api/admin/users/{created.json()['id']}"
+        assert client.put(endpoint, json={"active": True, "role": "admin"}).status_code == 200
+
+
+    for role, sql in (
+        (api, "DELETE FROM admin_audit"), (api, "SELECT * FROM webhook_events"),
+        (hook, "SELECT * FROM leads"), (hook, "UPDATE webhook_events SET status = 'PENDING'"),
+        (worker, "SELECT * FROM app_sessions"), (worker, "UPDATE leads SET assigned_user_id = NULL"),
+        (worker, "UPDATE leads SET commercial_status = 'LOST'"),
+        (worker, "UPDATE webhook_events SET meta_lead_id = '123'"),
+        (worker, "INSERT INTO leads (meta_lead_id, assigned_user_id) VALUES ('456', NULL)"),
+        (api, "CREATE TABLE forbidden (id int)"), (hook, "CREATE TABLE forbidden (id int)"),
+        (worker, "CREATE TABLE forbidden (id int)"),
+    ):
+        restricted = Database(as_role(role))
+        try:
+            with pytest.raises(ProgrammingError) as denied, restricted.engine.begin() as connection:
+                assert connection.scalar(text("SELECT current_user")) == role
+                connection.execute(text(sql))
+            assert denied.value.orig.sqlstate == "42501"
+        finally:
+            restricted.engine.dispose()

@@ -177,8 +177,11 @@ def patch_lead_status(lead_id: int, payload: StatusPatch, session: SessionDepend
 
 @router.get("/leads/{lead_id}/activities", response_model=list[ActivityResponse])
 def list_activities(lead_id: int, session: SessionDependency, user: CurrentUser) -> list[ActivityResponse]:
-    _scoped_lead(session, lead_id, user)
-    rows = list_lead_activities(session, lead_id)
+    rows = list_lead_activities(
+        session, lead_id, assigned_user_id=user.id if user.role == "usuario" else None
+    )
+    if rows is None:
+        _not_found()
     return [ActivityResponse.model_validate(row, from_attributes=True) for row in rows]
 
 

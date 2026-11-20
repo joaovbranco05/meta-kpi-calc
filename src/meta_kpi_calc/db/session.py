@@ -43,7 +43,12 @@ def create_sqlite_engine(settings: Settings) -> Engine:
 def create_database_engine(settings: Settings) -> Engine:
     if make_url(settings.active_database_url).get_backend_name() == "sqlite":
         return create_sqlite_engine(settings)
-    return create_engine(settings.active_database_url, pool_pre_ping=True, hide_parameters=True)
+    return create_engine(
+        settings.active_database_url,
+        pool_pre_ping=True,
+        hide_parameters=True,
+        isolation_level="READ COMMITTED",
+    )
 
 
 class Database:

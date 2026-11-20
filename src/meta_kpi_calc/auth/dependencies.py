@@ -16,28 +16,26 @@ SessionDependency = Annotated[Session, Depends(get_session)]
 SESSION_COOKIE = "rctec_session"
 
 
-def authenticate_session(request: Request, session: SessionDependency) -> int:
+def authenticate_session(request: Request, session: SessionDependency) -> AppUser:
     """Resolve a server-issued token; session issuance belongs to the OIDC phase."""
     token = request.cookies.get(SESSION_COOKIE, "")
     if re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
-        user_id = session.scalar(
-            select(AppSession.user_id).where(
+        user = session.scalar(
+            select(AppUser)
+            .join(AppSession, AppSession.user_id == AppUser.id)
+            .where(
+                AppUser.active.is_(True),
                 AppSession.token_digest == hashlib.sha256(token.encode()).hexdigest(),
                 AppSession.revoked_at.is_(None),
                 AppSession.expires_at > datetime.now(UTC),
             )
         )
-        if user_id is not None:
-            return user_id
+        if user is not None:
+            return user
     raise HTTPException(401, "Authentication required")
 
 
-def current_user(
-    user_id: Annotated[int, Depends(authenticate_session)], session: SessionDependency
-) -> AppUser:
-    user = session.get(AppUser, user_id)
-    if user is None or not user.active:
-        raise HTTPException(401, "Authentication required")
+def current_user(user: Annotated[AppUser, Depends(authenticate_session)]) -> AppUser:
     return user
 
 

@@ -40,6 +40,8 @@ class UserView(UserCreate):
 def lock_user_management(session: SessionDependency, admin: AppUser) -> None:
     """Serialize account mutations and recheck the acting administrator under the lock."""
     if session.get_bind().dialect.name == "postgresql":
+        if session.connection().get_isolation_level() != "READ COMMITTED":
+            raise HTTPException(503, "Administrative transaction isolation unavailable")
         session.execute(text("SELECT pg_advisory_xact_lock(718503120464)"))
     else:
         # SQLite serializes writers. Start a write transaction without touching a row.
@@ -101,8 +103,9 @@ def update_user(
     before = f"{user.role}:{user.active}"
     after = f"{payload.role}:{payload.active}"
     if before != after:
+        revoke_sessions = user.role != payload.role or not payload.active
         user.role, user.active = payload.role, payload.active
-        if not user.active:
+        if revoke_sessions:
             session.execute(
                 update(AppSession)
                 .where(AppSession.user_id == user.id, AppSession.revoked_at.is_(None))

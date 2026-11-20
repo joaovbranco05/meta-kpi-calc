@@ -37,7 +37,8 @@ class ClaimedEvent:
 
 def enqueue_events(session: Session, events: list[EventInput]) -> None:
     for event in events:
-        session.execute(insert_for_session(session, WebhookEvent).values(
+        # The webhook needs no generated ID from the insert.
+        session.execute(insert_for_session(session, WebhookEvent).inline().values(
             dedup_key=f"meta:leadgen:{event.page_id}:{event.lead_id}",
             meta_lead_id=event.lead_id, meta_page_id=event.page_id,
             meta_form_id=event.form_id, meta_ad_id=event.ad_id,

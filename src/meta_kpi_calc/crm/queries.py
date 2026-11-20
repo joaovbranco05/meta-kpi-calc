@@ -49,9 +49,20 @@ def get_lead(session: Session, lead_id: int) -> Lead | None:
     return session.get(Lead, lead_id)
 
 
-def list_lead_activities(session: Session, lead_id: int) -> list[LeadActivity]:
-    return session.scalars(
-        select(LeadActivity)
-        .where(LeadActivity.lead_id == lead_id)
+def list_lead_activities(
+    session: Session, lead_id: int, *, assigned_user_id: int | None = None
+) -> list[LeadActivity] | None:
+    # The outer join distinguishes an authorized lead without history from an
+    # inaccessible lead, using the same database snapshot for scope and data.
+    statement = (
+        select(Lead.id, LeadActivity)
+        .outerjoin(LeadActivity, LeadActivity.lead_id == Lead.id)
+        .where(Lead.id == lead_id)
         .order_by(LeadActivity.created_at, LeadActivity.id)
-    ).all()
+    )
+    if assigned_user_id is not None:
+        statement = statement.where(Lead.assigned_user_id == assigned_user_id)
+    rows = session.execute(statement).all()
+    if not rows:
+        return None
+    return [activity for _, activity in rows if activity is not None]

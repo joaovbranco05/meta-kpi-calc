@@ -204,8 +204,7 @@ def test_crm_api_lists_and_updates_as_admin(migrated_database) -> None:
         admin = AppUser(issuer="test", subject="admin", role="admin", active=True)
         session.add(admin)
         session.flush()
-        admin_id = admin.id
-    app.dependency_overrides[authenticate_session] = lambda: admin_id
+    app.dependency_overrides[authenticate_session] = lambda: admin
     with TestClient(app) as client:
         response = client.get("/api/crm/leads", params={"commercial_status": "NEW"})
         assert response.status_code == 200

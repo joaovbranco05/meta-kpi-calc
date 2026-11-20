@@ -197,3 +197,96 @@ def test_concurrent_admin_deactivation_keeps_one_active(migrated_database):
             )
             == 1
         )
+
+
+def test_profile_changes_revoke_all_existing_sessions(migrated_database):
+    settings, database = migrated_database
+    with database.session_factory.begin() as session:
+        admin = _account(session, "admin", "admin")
+        user = _account(session, "usuario", "target")
+
+    def new_session():
+        token = secrets.token_urlsafe(32)
+        with database.session_factory.begin() as session:
+            session.add(
+                AppSession(
+                    user_id=user[0],
+                    token_digest=hashlib.sha256(token.encode()).hexdigest(),
+                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+                )
+            )
+        return user[0], token
+
+    previous_sessions = [user, new_session()]
+    with TestClient(create_app(settings)) as client:
+        endpoint = f"/api/admin/users/{user[0]}"
+        for role, active, expected in (
+            ("admin", True, 200),
+            ("usuario", True, 403),
+            ("usuario", False, 401),
+            ("usuario", True, 403),
+        ):
+            _login(client, admin)
+            assert client.put(endpoint, json={"role": role, "active": active}).status_code == 200
+            for account in previous_sessions:
+                _login(client, account)
+                assert client.get("/api/campaigns").status_code == 401
+            # A fresh cookie represents reauthentication; only the fixture issues it.
+            if active:
+                fresh = new_session()
+                previous_sessions.append(fresh)
+                _login(client, fresh)
+                assert client.get("/api/campaigns").status_code == expected
+
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(AdminAudit)) == 4
+
+
+def test_administrative_audit_failure_rolls_back(migrated_database):
+    from sqlalchemy import event
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from meta_kpi_calc.crm.models import Lead
+
+    settings, database = migrated_database
+    with database.session_factory.begin() as session:
+        admin = _account(session, "admin", "admin")
+        target = _account(session, "usuario", "target")
+        lead_id = ingest_lead(session, LeadSubmission("123", {})).lead.id
+
+    def fail_audit(_mapper, _connection, _target):
+        raise SQLAlchemyError("Synthetic audit failure")
+
+    event.listen(AdminAudit, "before_insert", fail_audit)
+    try:
+        with TestClient(create_app(settings)) as client:
+            _login(client, admin)
+            path = f"/api/crm/leads/{lead_id}/assignment"
+            assert (
+                client.patch(
+                    path, json={"assigned_user_id": target[0], "actor_id": target[0]}
+                ).status_code
+                == 422
+            )
+            assert client.patch(path, json={"assigned_user_id": target[0]}).status_code == 503
+            assert (
+                client.put(
+                    f"/api/admin/users/{target[0]}", json={"role": "admin", "active": False}
+                ).status_code
+                == 503
+            )
+            assert (
+                client.post(
+                    "/api/admin/users", json={"issuer": "test", "subject": "new", "role": "usuario"}
+                ).status_code
+                == 503
+            )
+            _login(client, target)
+            assert client.get("/api/crm/leads").status_code == 200
+    finally:
+        event.remove(AdminAudit, "before_insert", fail_audit)
+    with database.session_factory() as session:
+        assert session.get(Lead, lead_id).assigned_user_id is None
+        assert session.get(AppUser, target[0]).role == "usuario"
+        assert session.scalar(select(func.count()).select_from(AppUser)) == 2
+        assert session.scalar(select(func.count()).select_from(AdminAudit)) == 0
