@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import hmac
 import secrets
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlencode
@@ -14,18 +15,20 @@ from sqlalchemy import delete, select, update
 
 from meta_kpi_calc.auth.admin import account_clock, lock_accounts
 from meta_kpi_calc.auth.dependencies import (
+    BROWSER_COOKIE,
     SESSION_COOKIE,
     CurrentUser,
     SessionDependency,
     csrf_token,
+    session_binding,
     session_digest,
-    verify_csrf,
+    valid_cookie,
 )
-from meta_kpi_calc.auth.models import AppSession, AppUser, OIDCFlow
+from meta_kpi_calc.auth.models import AppSession, AppUser, BrowserContext, OIDCFlow
 from meta_kpi_calc.auth.oidc import AUTHORIZE, exchange_identity
 
 router = APIRouter(prefix="/auth")
-FLOW_COOKIE = "__Host-rctec_oidc"
+BROWSER_SECONDS = 86400
 FLOW_SECONDS = 600
 PRIVATE_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 
@@ -47,13 +50,26 @@ def login(request: Request, session: SessionDependency):
     fetch_site = request.headers.get("sec-fetch-site")
     if fetch_site not in (None, "none", "same-origin"):
         raise HTTPException(403, "Login must start on this site")
-    state, browser, verifier, nonce = (secrets.token_urlsafe(32) for _ in range(4))
+    state, verifier, nonce = (secrets.token_urlsafe(32) for _ in range(3))
+    lock_accounts(session)
     now = account_clock(session)
+    cookie, context = load_browser(request, session, now)
+    if context is None:
+        cookie = secrets.token_urlsafe(32)
+        context = BrowserContext(
+            digest=session_digest(cookie),
+            generation=0,
+            expires_at=now + timedelta(seconds=BROWSER_SECONDS),
+        )
+        session.add(context)
+    context.generation += 1
+    session.execute(delete(OIDCFlow).where(OIDCFlow.browser_digest == context.digest))
     session.execute(delete(OIDCFlow).where(OIDCFlow.expires_at <= now))
     session.add(
         OIDCFlow(
             state_digest=session_digest(state),
-            browser_digest=session_digest(browser),
+            browser_digest=context.digest,
+            generation=context.generation,
             verifier=verifier,
             nonce=nonce,
             expires_at=now + timedelta(seconds=FLOW_SECONDS),
@@ -79,7 +95,12 @@ def login(request: Request, session: SessionDependency):
     )
     result = RedirectResponse(f"{AUTHORIZE}?{query}", headers=PRIVATE_HEADERS, status_code=303)
     result.set_cookie(
-        FLOW_COOKIE, browser, max_age=FLOW_SECONDS, secure=True, httponly=True, samesite="lax"
+        BROWSER_COOKIE,
+        cookie,
+        expires=utc(context.expires_at),
+        secure=True,
+        httponly=True,
+        samesite="lax",
     )
     return result
 
@@ -89,8 +110,8 @@ def callback(request: Request, session: SessionDependency):
     config, origin = config_for(request)
     query = request.query_params
     state, code = query.get("state", ""), query.get("code", "")
-    browser = request.cookies.get(FLOW_COOKIE, "")
-    if len(query.getlist("state")) != 1 or len(state) != 43 or len(browser) != 43:
+    browser = request.cookies.get(BROWSER_COOKIE, "")
+    if len(query.getlist("state")) != 1 or not valid_cookie(state) or not valid_cookie(browser):
         raise HTTPException(400, "Invalid login transaction")
     flow = session.execute(
         delete(OIDCFlow)
@@ -99,7 +120,7 @@ def callback(request: Request, session: SessionDependency):
             OIDCFlow.browser_digest == session_digest(browser),
             OIDCFlow.expires_at > account_clock(session),
         )
-        .returning(OIDCFlow.verifier, OIDCFlow.nonce, OIDCFlow.expires_at)
+        .returning(OIDCFlow.verifier, OIDCFlow.nonce, OIDCFlow.expires_at, OIDCFlow.generation)
     ).one_or_none()
     session.commit()
     if (
@@ -129,6 +150,9 @@ def callback(request: Request, session: SessionDependency):
         raise HTTPException(401, "Corporate identity could not be verified") from None
 
     lock_accounts(session)
+    _, context = load_browser(request, session, account_clock(session))
+    if context is None or context.generation != flow.generation:
+        raise HTTPException(400, "Invalid login transaction")
     user = session.scalar(
         select(AppUser).where(
             AppUser.issuer == issuer,
@@ -143,27 +167,22 @@ def callback(request: Request, session: SessionDependency):
     ):
         raise HTTPException(403, "Account changed; start a new login")
     now = account_clock(session)
-    if utc(flow.expires_at) <= now:
+    if min(utc(flow.expires_at), utc(context.expires_at)) <= now:
         raise HTTPException(400, "Invalid login transaction")
-    old = request.cookies.get(SESSION_COOKIE, "")
-    if len(old) == 43:
-        session.execute(
-            update(AppSession)
-            .where(
-                AppSession.token_digest == session_digest(old),
-                AppSession.revoked_at.is_(None),
-            )
-            .values(revoked_at=now)
-        )
+    revoke_context_sessions(session, context, now)
     token = secrets.token_urlsafe(32)
-    lifetime = timedelta(minutes=config.oidc_session_minutes)
+    lifetime = min(timedelta(minutes=config.oidc_session_minutes), utc(context.expires_at) - now)
     session.add(
-        AppSession(user_id=user.id, token_digest=session_digest(token), expires_at=now + lifetime)
+        AppSession(
+            user_id=user.id,
+            token_digest=session_digest(token),
+            expires_at=now + lifetime,
+            browser_digest=context.digest,
+        )
     )
     session.commit()
 
     result = RedirectResponse("/", headers=PRIVATE_HEADERS, status_code=303)
-    result.delete_cookie(FLOW_COOKIE, secure=True, httponly=True, samesite="lax")
     result.set_cookie(
         SESSION_COOKIE,
         token,
@@ -177,13 +196,22 @@ def callback(request: Request, session: SessionDependency):
 
 @router.get("/session")
 def session_view(request: Request, user: CurrentUser):
-    return {"id": user.id, "role": user.role, "csrf": csrf_token(request.cookies[SESSION_COOKIE])}
+    token = request.cookies[SESSION_COOKIE]
+    return {
+        "id": user.id,
+        "role": user.role,
+        "csrf": csrf_token(token),
+        "binding": session_binding(token),
+    }
 
 
 @router.get("/logout", response_class=HTMLResponse)
-def logout_form(request: Request, _user: CurrentUser):
+def logout_form(request: Request, session: SessionDependency):
     config_for(request)
-    token = csrf_token(request.cookies[SESSION_COOKIE])
+    cookie, context = load_browser(request, session, account_clock(session))
+    if context is None:
+        return RedirectResponse("/", status_code=303)
+    token = csrf_token(cookie)
     return HTMLResponse(
         '<!doctype html><html lang="pt-BR"><meta charset="utf-8"><title>Sair do CRM</title>'
         '<form method="post" action="/auth/logout">'
@@ -198,8 +226,10 @@ def logout_form(request: Request, _user: CurrentUser):
 
 
 @router.post("/logout")
-async def logout(request: Request, session: SessionDependency, _user: CurrentUser):
-    config_for(request)
+async def logout(request: Request, session: SessionDependency):
+    _, origin = config_for(request)
+    if request.headers.get("origin") != origin:
+        raise HTTPException(403, "Invalid request origin")
     from starlette.concurrency import run_in_threadpool
 
     data = bytearray()
@@ -212,18 +242,76 @@ async def logout(request: Request, session: SessionDependency, _user: CurrentUse
     except ValueError:
         raise HTTPException(400, "Invalid logout request") from None
     values = fields.get("csrf", [])
-    verify_csrf(request, values[0] if len(values) == 1 else "", require_origin=True)
-    return await run_in_threadpool(revoke_browser_session, request, session)
+    supplied = values[0] if len(values) == 1 else ""
+    return await run_in_threadpool(revoke_browser_session, request, session, supplied)
 
 
-def revoke_browser_session(request, session):
+def load_browser(request, session, now):
+    cookie = request.cookies.get(BROWSER_COOKIE, "")
+    context = session.get(BrowserContext, session_digest(cookie)) if valid_cookie(cookie) else None
+    if context is not None and utc(context.expires_at) <= now:
+        context = None
+    return cookie, context
+
+
+def revoke_context_sessions(session, context, now):
     session.execute(
         update(AppSession)
-        .where(AppSession.token_digest == session_digest(request.cookies[SESSION_COOKIE]))
-        .values(revoked_at=account_clock(session))
+        .where(
+            AppSession.browser_digest == context.digest,
+            AppSession.revoked_at.is_(None),
+        )
+        .values(revoked_at=now)
     )
+
+
+def revoke_browser_session(request, session, supplied):
+    lock_accounts(session)
+    now = account_clock(session)
+    cookie, context = load_browser(request, session, now)
+    if context is None or not hmac.compare_digest(supplied.encode(), csrf_token(cookie).encode()):
+        raise HTTPException(403, "Invalid CSRF token")
+    context.generation += 1
+    session.execute(delete(OIDCFlow).where(OIDCFlow.browser_digest == context.digest))
+    revoke_context_sessions(session, context, now)
     session.commit()
     result = RedirectResponse("/", headers=PRIVATE_HEADERS, status_code=303)
     result.delete_cookie(SESSION_COOKIE, secure=True, httponly=True, samesite="lax")
-    result.delete_cookie(FLOW_COOKIE, secure=True, httponly=True, samesite="lax")
     return result
+
+
+@router.get("/edge-entry")
+def edge_entry(request: Request, session: SessionDependency):
+    from meta_kpi_calc.auth.dependencies import authenticate_session
+
+    try:
+        authenticate_session(request, session)
+    except HTTPException as error:
+        if error.status_code != 401:
+            raise
+        return HTMLResponse(
+            '<!doctype html><html lang="pt-BR"><meta charset="utf-8"><title>Mini-CRM RCTEC</title>'
+            '<h1>Mini-CRM RCTEC</h1><a href="/auth/login">Entrar com Google Workspace</a></html>',
+            status_code=401,
+            headers=PRIVATE_HEADERS,
+        )
+    return HTMLResponse("", status_code=204, headers=PRIVATE_HEADERS)
+
+
+@router.get("/edge-session")
+def edge_session(request: Request, _user: CurrentUser):
+    from fastapi import Response
+
+    return Response(
+        status_code=204,
+        headers={
+            "X-RCTEC-Session": session_binding(request.cookies[SESSION_COOKIE]),
+            **PRIVATE_HEADERS,
+        },
+    )
+
+
+def require_download_binding(request: Request, binding: str = "") -> None:
+    token = request.cookies.get(SESSION_COOKIE, "")
+    if not hmac.compare_digest(binding.encode(), session_binding(token).encode()):
+        raise HTTPException(403, "Download does not belong to this session")

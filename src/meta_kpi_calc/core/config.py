@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     oidc_client_secret: SecretStr | None = None
     oidc_workspace_domain: str | None = None
     oidc_public_origin: HttpUrl | None = None
-    oidc_session_minutes: int = Field(default=60, ge=5, le=480)
+    oidc_session_minutes: int = Field(default=30, ge=5, le=30)
 
     scheduler_enabled: bool = False
     sync_interval_minutes: int = Field(default=60, gt=0)

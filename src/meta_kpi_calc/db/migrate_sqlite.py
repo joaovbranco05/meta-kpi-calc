@@ -23,7 +23,8 @@ from meta_kpi_calc.db.base import Base
 
 LEGACY_REVISION = "0006_lead_ads_inbox"
 AUTH_REVISION = "0007_crm_authorization"
-REVISION = "0008_oidc_flows"
+FLOW_REVISION = "0008_oidc_flows"
+REVISION = "0009_browser_context"
 
 
 def _normalized(value):
@@ -55,14 +56,14 @@ def migrate_snapshot(source: Path, target_engine, *, execute: bool = False) -> d
     try:
         with source_engine.connect() as src, target_engine.begin() as dst:
             revision = src.scalar(text("SELECT version_num FROM alembic_version"))
-            if revision not in {LEGACY_REVISION, AUTH_REVISION, REVISION}:
+            if revision not in {LEGACY_REVISION, AUTH_REVISION, FLOW_REVISION, REVISION}:
                 raise ValueError("Source schema revision is not supported")
             if dst.scalar(text("SELECT version_num FROM alembic_version")) != revision:
                 raise ValueError("Destination schema revision is not supported")
             metadata = Base.metadata
             if revision != LEGACY_REVISION and src.scalar(text("SELECT count(*) FROM app_sessions")):
                 raise ValueError("Snapshots containing application sessions are not supported")
-            if revision == REVISION and src.scalar(text("SELECT count(*) FROM oidc_flows")):
+            if revision in {FLOW_REVISION, REVISION} and src.scalar(text("SELECT count(*) FROM oidc_flows")):
                 raise ValueError("Snapshots containing login transactions are not supported")
             if revision != REVISION:
                 metadata = MetaData()
@@ -70,6 +71,8 @@ def migrate_snapshot(source: Path, target_engine, *, execute: bool = False) -> d
                     bind=dst,
                     only=lambda name, _: name != "alembic_version" and name in Base.metadata.tables,
                 )
+            if revision == REVISION and src.scalar(text("SELECT count(*) FROM browser_contexts")):
+                raise ValueError("Snapshots containing browser contexts are not supported")
             tables = metadata.sorted_tables
             counts = {}
             for table in tables:

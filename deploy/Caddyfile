@@ -1,0 +1,62 @@
+{
+	admin off
+	log {
+		exclude http.log.error
+	}
+	auto_https disable_redirects
+}
+
+{$CRM_SITE} {
+	bind {$CRM_BIND:127.0.0.1}
+	@auth_get {
+		method GET
+		path /auth/login /auth/callback /auth/logout
+	}
+	@auth_post {
+		method POST
+		path /auth/logout
+	}
+	@downloads {
+		method GET
+		path /downloads/report /downloads/comparison
+	}
+	@private path /api /api/* /auth /auth/* /downloads /downloads/* /health /docs /redoc /openapi.json
+	@stream {
+		method GET
+		path /_stcore/stream
+		header Upgrade websocket
+		header Origin {$CRM_ORIGIN}
+	}
+	@stream_path path /_stcore/stream /_stcore/stream/*
+	@extra path /media /media/* /_stcore/agent /_stcore/agent/* /_stcore/metrics /_stcore/message /_stcore/message/* /_stcore/upload_file /_stcore/upload_file/*
+	@shell path /static/* /favicon.png /manifest.json /_stcore/health /_stcore/host-config
+
+	route {
+		request_header -X-RCTEC-Session
+		reverse_proxy @auth_get {$CRM_API}
+		reverse_proxy @auth_post {$CRM_API}
+		reverse_proxy @downloads {$CRM_API}
+		respond @private 404
+		handle @stream {
+			forward_auth {$CRM_API} {
+				uri /auth/edge-session
+				header_up -Upgrade
+				header_up -Connection
+				copy_headers X-RCTEC-Session
+			}
+			reverse_proxy {$CRM_STREAMLIT} {
+				stream_timeout 30s
+			}
+		}
+		respond @stream_path 403
+		respond @extra 404
+		handle / {
+			forward_auth {$CRM_API} {
+				uri /auth/edge-entry
+			}
+			reverse_proxy {$CRM_STREAMLIT}
+		}
+		reverse_proxy @shell {$CRM_STREAMLIT}
+		respond 404
+	}
+}

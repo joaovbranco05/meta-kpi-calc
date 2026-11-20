@@ -1,16 +1,16 @@
 """Small local Streamlit panel that talks exclusively to the REST API."""
 
-import base64
 import hashlib
 import os
 import re
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
-from meta_kpi_calc.auth.dependencies import SESSION_COOKIE
+from meta_kpi_calc.auth.dependencies import BROWSER_COOKIE, SESSION_COOKIE
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 EFFECTIVE_STATUS_OPTIONS = ("", "ACTIVE", "PAUSED", "ARCHIVED", "DELETED", "DISABLED")
@@ -594,12 +594,6 @@ def _comparison_campaigns(
     return items if len(items) >= total else None
 
 
-def _clear_stale_comparison_export(st: Any, export_scope: dict[str, object]) -> None:
-    if st.session_state.get("comparison_export_scope") != export_scope:
-        st.session_state.pop("comparison_export", None)
-        st.session_state.pop("comparison_export_scope", None)
-
-
 def _compare_campaigns(st: Any, client: httpx.Client, filters: dict[str, str]) -> None:
     """Render the detailed, multi-campaign comparison without external calls."""
     st.subheader("Comparar campanhas")
@@ -639,8 +633,6 @@ def _compare_campaigns(st: Any, client: httpx.Client, filters: dict[str, str]) -
         format_func=lambda campaign_id: labels[campaign_id],
     )
     st.session_state["comparison_campaign_ids"] = selected_ids
-    export_scope = {"filters": dict(scope_filters), "campaign_ids": list(selected_ids)}
-    _clear_stale_comparison_export(st, export_scope)
     if len(selected_ids) < 2:
         st.info("Selecione duas ou mais campanhas para comparar.")
         return
@@ -686,21 +678,9 @@ def _compare_campaigns(st: Any, client: httpx.Client, filters: dict[str, str]) -
         st.dataframe(warning_rows, hide_index=True, use_container_width=True)
     else:
         st.caption("Nenhuma pendência ou inconsistência registrada para as campanhas selecionadas.")
-    if st.button("Preparar exportação da comparação"):
-        try:
-            response = client.get(
-                f"{API_BASE_URL}/api/dashboard/campaign-comparison/export",
-                params=_comparison_params(scope_filters, selected_ids),
-                timeout=10,
-            )
-            response.raise_for_status()
-        except (httpx.HTTPError, ValueError):
-            st.error("Não foi possível preparar a comparação.")
-        else:
-            st.session_state["comparison_export"] = response.content
-            st.session_state["comparison_export_scope"] = export_scope
-    if report := st.session_state.get("comparison_export"):
-        _download_xlsx(report, "meta-kpi-comparacao.xlsx", "Baixar comparação XLSX")
+    _download_link(
+        st, "comparison", "Baixar comparação XLSX", _comparison_params(scope_filters, selected_ids)
+    )
 
 
 def _set_enrollment_form_values(st: Any, record: dict[str, Any] | None, campaign: dict[str, Any]) -> None:
@@ -1021,47 +1001,19 @@ def _sync(st: Any, client: httpx.Client, filters: dict[str, str], sync_state: di
         st.rerun()
 
 
-def _export(st: Any, client: httpx.Client, filters: dict[str, str]) -> None:
+def _export(st: Any, filters: dict[str, str]) -> None:
     st.subheader("Exportar relatório")
-    if not _export_is_current(st, filters):
-        st.session_state.pop("report_export", None)
-        st.session_state.pop("report_export_filters", None)
-    if st.button("Preparar relatório XLSX"):
-        try:
-            response = client.get(
-                f"{API_BASE_URL}/api/export",
-                params={**filters, "format": "xlsx", "dataset": "performance"},
-                timeout=10,
-            )
-            response.raise_for_status()
-        except (httpx.HTTPError, ValueError):
-            st.error("Não foi possível preparar o relatório.")
-        else:
-            st.session_state["report_export"] = response.content
-            st.session_state["report_export_filters"] = dict(filters)
-    if report := st.session_state.get("report_export"):
-        _download_xlsx(report, "meta-kpi-report.xlsx", "Baixar relatório XLSX")
+    _download_link(st, "report", "Baixar relatório XLSX", {
+        **filters, "format": "xlsx", "dataset": "performance",
+    })
 
 
-def _download_xlsx(content: bytes, filename: str, label: str) -> None:
+def _download_link(st: Any, endpoint: str, label: str, parameters: dict) -> None:
     from html import escape
 
-    from streamlit.components.v1 import html
-
-    data = base64.b64encode(content).decode("ascii")
-    html(
-        '<a download="' + escape(filename, quote=True)
-        + '" href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,'
-        + data + '">' + escape(label) + "</a>",
-        height=34,
-    )
-
-
-def _export_is_current(st: Any, filters: dict[str, str]) -> bool:
-    return (
-        "report_export" not in st.session_state
-        or st.session_state.get("report_export_filters") == filters
-    )
+    params = urlencode({**parameters, "binding": st.session_state["download_binding"]}, doseq=True)
+    href = escape(f"/downloads/{endpoint}?{params}", quote=True)
+    st.html(f'<a href="{href}">{escape(label)}</a>')
 
 
 def _login_screen(st: Any) -> None:
@@ -1069,10 +1021,16 @@ def _login_screen(st: Any) -> None:
     st.html('<a href="/auth/login" target="_self">Entrar com Google Workspace</a>')
 
 
-def _auth_headers(token: str) -> dict[str, str]:
-    if not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
+def _api_client(**kwargs) -> httpx.Client:
+    socket = os.getenv("CRM_API_SOCKET")
+    transport = httpx.HTTPTransport(uds=socket, trust_env=False) if socket else None
+    return httpx.Client(transport=transport, trust_env=False, **kwargs)
+
+
+def _auth_headers(token: str, browser: str) -> dict[str, str]:
+    if not all(re.fullmatch(r"[A-Za-z0-9_-]{43}", value) for value in (token, browser)):
         return {}
-    return {"Cookie": f"{SESSION_COOKIE}={token}"}
+    return {"Cookie": f"{SESSION_COOKIE}={token}; {BROWSER_COOKIE}={browser}"}
 
 
 def main() -> None:
@@ -1081,7 +1039,7 @@ def main() -> None:
     st.set_page_config(page_title="Meta KPI Calculator", layout="wide")
     st.title("Meta KPI Calculator")
     token = st.context.cookies.get(SESSION_COOKIE, "")
-    headers = _auth_headers(token)
+    headers = _auth_headers(token, st.context.cookies.get(BROWSER_COOKIE, ""))
     if not headers:
         _login_screen(st)
         return
@@ -1090,7 +1048,12 @@ def main() -> None:
 
     @st.fragment(run_every="15s")
     def check_session():
-        with httpx.Client(headers=headers, trust_env=False) as checker:
+        current_token = st.context.cookies.get(SESSION_COOKIE, "")
+        current_headers = _auth_headers(current_token, st.context.cookies.get(BROWSER_COOKIE, ""))
+        if current_headers != headers:
+            st.session_state.clear()
+            st.rerun()
+        with _api_client(headers=current_headers) as checker:
             active = _request(checker, "GET", "/auth/session")
         if not active or (active["id"], active["role"], session_fingerprint) != st.session_state.get("identity"):
             st.session_state.clear()
@@ -1101,7 +1064,7 @@ def main() -> None:
             st.session_state.clear()
             st.rerun()
 
-    with httpx.Client(headers=headers, trust_env=False, event_hooks={"response": [on_response]}) as client:
+    with _api_client(headers=headers, event_hooks={"response": [on_response]}) as client:
         identity = _request(client, "GET", "/auth/session")
         if not identity:
             _login_screen(st)
@@ -1110,6 +1073,7 @@ def main() -> None:
         if st.session_state.get("identity") != fingerprint:
             st.session_state.clear()
             st.session_state["identity"] = fingerprint
+        st.session_state["download_binding"] = identity["binding"]
         client.headers["X-CSRF-Token"] = identity["csrf"]
         st.html('<a href="/auth/logout" target="_self">Sair</a> · '
                 '<a href="/auth/login" target="_self">Trocar conta</a>')
@@ -1150,7 +1114,7 @@ def main() -> None:
                 st.info(notice)
             _sync(st, client, filters, sync_state)
         with export:
-            _export(st, client, filters)
+            _export(st, filters)
 
 
 if __name__ == "__main__":

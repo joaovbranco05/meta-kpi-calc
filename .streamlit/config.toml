@@ -1,0 +1,7 @@
+[server]
+address = "127.0.0.1"
+enableXsrfProtection = true
+trustedUserHeaders = '{"X-RCTEC-Session":"rctec_session"}'
+
+[browser]
+gatherUsageStats = false

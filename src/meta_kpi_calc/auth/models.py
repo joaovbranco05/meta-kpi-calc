@@ -32,12 +32,21 @@ class AppUser(Base):
     auth_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class BrowserContext(Base):
+    __tablename__ = "browser_contexts"
+
+    digest: Mapped[str] = mapped_column(String(64), primary_key=True)
+    generation: Mapped[int] = mapped_column(Integer)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class AppSession(Base):
     __tablename__ = "app_sessions"
 
     token_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("app_users.id"), index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    browser_digest: Mapped[str | None] = mapped_column(ForeignKey("browser_contexts.digest"), index=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -61,6 +70,7 @@ class OIDCFlow(Base):
 
     state_digest: Mapped[str] = mapped_column(String(64), primary_key=True)
     browser_digest: Mapped[str] = mapped_column(String(64))
+    generation: Mapped[int] = mapped_column(Integer)
     verifier: Mapped[str] = mapped_column(String(43))
     nonce: Mapped[str] = mapped_column(String(43))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

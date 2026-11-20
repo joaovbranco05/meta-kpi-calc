@@ -10,10 +10,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
+from meta_kpi_calc.api.routes.dashboard import export_campaign_comparison, export_report
 from meta_kpi_calc.api.routes.health import router as health_router
 from meta_kpi_calc.api.routes.rest import router as rest_router
 from meta_kpi_calc.auth.admin import router as admin_router
 from meta_kpi_calc.auth.dependencies import require_admin
+from meta_kpi_calc.auth.routes import require_download_binding
 from meta_kpi_calc.auth.routes import router as auth_router
 from meta_kpi_calc.core.config import Settings, get_settings
 from meta_kpi_calc.core.logging import configure_logging
@@ -111,11 +113,19 @@ def create_app(
     application.include_router(admin_router)
     application.include_router(auth_router)
     application.include_router(crm_router)
+    for path, endpoint in (
+        ("/downloads/report", export_report),
+        ("/downloads/comparison", export_campaign_comparison),
+    ):
+        application.add_api_route(
+            path, endpoint, methods=["GET"],
+            dependencies=[Depends(require_admin), Depends(require_download_binding)],
+        )
 
     @application.middleware("http")
     async def prevent_auth_caching(request: Request, call_next):
         response = await call_next(request)
-        if request.url.path.startswith("/auth/"):
+        if request.url.path.startswith(("/auth/", "/downloads/")):
             response.headers["Cache-Control"] = "no-store"
             response.headers.setdefault("Referrer-Policy", "no-referrer")
         return response

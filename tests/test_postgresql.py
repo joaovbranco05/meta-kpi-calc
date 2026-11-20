@@ -101,7 +101,7 @@ def test_schema_and_upgrade_idempotent(pg_database):
     settings, database = pg_database
     with database.engine.connect() as connection:
         assert int(connection.scalar(text("SHOW server_version_num"))) // 10000 == 17
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0008_oidc_flows"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0009_browser_context"
     env = os.environ.copy()
     url = make_url(settings.demo_database_url).set(password="synthetic%:password")
     env.update(DEMO_MODE="true", DATABASE_URL=settings.database_url,
@@ -414,7 +414,7 @@ def test_service_roles_with_minimum_grants(pg_database, tmp_path):
     with database.engine.begin() as connection:
         grants = (
             f"GRANT SELECT, INSERT, UPDATE ON app_users TO {api}",
-            f"GRANT SELECT ON app_sessions TO {api}",
+            f"GRANT SELECT ON app_sessions, browser_contexts TO {api}",
             f"GRANT UPDATE (revoked_at) ON app_sessions TO {api}",
             f"GRANT INSERT ON admin_audit TO {api}",
             f"GRANT SELECT (id, created_at) ON admin_audit TO {api}",
@@ -500,3 +500,10 @@ def test_oidc_callback_and_logout_on_postgresql(pg_database):
     from test_oidc import test_login_csrf_expiry_logout_and_replay
 
     test_login_csrf_expiry_logout_and_replay(pg_database)
+
+
+@pytest.mark.parametrize("logout_first", [True, False])
+def test_oidc_logout_callback_race_on_postgresql(pg_database, logout_first):
+    from test_oidc import test_logout_fences_callback_in_both_commit_orders
+
+    test_logout_fences_callback_in_both_commit_orders(pg_database, logout_first)

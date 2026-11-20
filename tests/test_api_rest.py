@@ -1341,7 +1341,7 @@ def test_frontend_comparison_loads_all_campaign_pages(
     assert request.call_args_list[1].kwargs["params"]["offset"] == 100
 
 
-def test_frontend_comparison_clears_export_when_selection_changes() -> None:
+def test_frontend_download_link_is_bound_to_session() -> None:
     path = Path(__file__).resolve().parents[1] / "frontend" / "app.py"
     spec = spec_from_file_location("frontend_app", path)
     assert spec is not None and spec.loader is not None
@@ -1349,16 +1349,16 @@ def test_frontend_comparison_clears_export_when_selection_changes() -> None:
     spec.loader.exec_module(frontend_app)
 
     class FakeStreamlit:
-        session_state = {
-            "comparison_export": b"old report",
-            "comparison_export_scope": {"campaign_ids": [1, 2]},
-        }
+        session_state = {"download_binding": "session-bound"}
 
-    frontend_app._clear_stale_comparison_export(
-        FakeStreamlit(), {"campaign_ids": [1]}
-    )
+        def html(self, markup):
+            self.link = markup
 
-    assert FakeStreamlit.session_state == {}
+    stub = FakeStreamlit()
+    frontend_app._download_link(stub, "comparison", "Exportar", {"campaign_ids": [1, 2]})
+    assert 'href="/downloads/comparison?' in stub.link
+    assert "binding=session-bound" in stub.link
+    assert "campaign_ids=1&amp;campaign_ids=2" in stub.link
 
 
 def test_frontend_comparison_distinguishes_missing_media_and_unaggregated_margin() -> None:
@@ -1431,12 +1431,6 @@ def test_frontend_uses_local_health_default_period_and_current_export_scope() ->
         {"date_start": DAY_1.isoformat(), "date_stop": DAY_2.isoformat()},
     )
     assert filters == {"date_start": DAY_1.isoformat(), "date_stop": DAY_2.isoformat()}
-    streamlit.session_state["report_export"] = b"old report"
-    streamlit.session_state["report_export_filters"] = dict(filters)
-    assert frontend_app._export_is_current(streamlit, filters)
-    assert not frontend_app._export_is_current(
-        streamlit, {"date_start": DAY_1.isoformat(), "date_stop": DAY_1.isoformat()}
-    )
 
 
 @pytest.mark.parametrize(

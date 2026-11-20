@@ -15,7 +15,7 @@ from sqlalchemy import select
 from test_authorization import _account, _login
 
 from meta_kpi_calc.api.app import create_app
-from meta_kpi_calc.auth.dependencies import SESSION_COOKIE
+from meta_kpi_calc.auth.dependencies import BROWSER_COOKIE, SESSION_COOKIE, csrf_token
 from meta_kpi_calc.auth.models import AppSession, AppUser
 from meta_kpi_calc.auth.oidc import ISSUER, JWKS_URL, TOKEN_URL
 
@@ -136,10 +136,17 @@ def test_login_csrf_expiry_logout_and_replay(migrated_database):
         assert form.status_code == 200
         assert form.headers["referrer-policy"] == "same-origin"
         assert client.get("/auth/session").status_code == 200
-        assert client.post("/auth/logout", data={"csrf": identity["csrf"]}).status_code == 403
         assert (
             client.post(
-                "/auth/logout", headers={"Origin": ORIGIN}, data={"csrf": identity["csrf"]}
+                "/auth/logout", data={"csrf": csrf_token(client.cookies[BROWSER_COOKIE])}
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                "/auth/logout",
+                headers={"Origin": ORIGIN},
+                data={"csrf": csrf_token(client.cookies[BROWSER_COOKIE])},
             ).status_code
             == 303
         )
@@ -256,6 +263,7 @@ def test_switch_account_revokes_previous_cookie(migrated_database):
         assert client.get("/api/campaigns").status_code == 200
         with TestClient(app, base_url=ORIGIN) as old_tab:
             old_tab.cookies.set(SESSION_COOKIE, previous)
+            old_tab.cookies.set(BROWSER_COOKIE, client.cookies[BROWSER_COOKIE])
             assert old_tab.get("/auth/session").status_code == 401
 
 
@@ -267,3 +275,97 @@ def test_oidc_log_redaction():
         "Cookie: __Host-rctec_session=synthetic-session; __Host-rctec_oidc=synthetic-flow"
     )
     assert "synthetic-" not in redact_text(raw)
+
+
+def logout_context(client):
+    return client.post(
+        "/auth/logout",
+        headers={"Origin": ORIGIN},
+        data={"csrf": csrf_token(client.cookies[BROWSER_COOKIE])},
+    )
+
+
+@pytest.mark.parametrize("logout_first", [True, False])
+def test_logout_fences_callback_in_both_commit_orders(migrated_database, logout_first):
+    provider = Provider()
+    app, db = build(migrated_database, provider)
+    from starlette.concurrency import run_in_threadpool
+
+    response_waiting, release_response, hold_response = Event(), Event(), Event()
+
+    @app.middleware("http")
+    async def delay_callback_response(request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/auth/callback" and hold_response.is_set():
+            # The endpoint has already committed; the browser has no Set-Cookie yet.
+            response_waiting.set()
+            assert await run_in_threadpool(release_response.wait, 10)
+        return response
+
+    with db.session_factory.begin() as session:
+        session.add(AppUser(issuer=ISSUER, subject="subject", role="usuario", active=True))
+    with (
+        TestClient(app, base_url=ORIGIN, follow_redirects=False) as callback,
+        TestClient(app, base_url=ORIGIN, follow_redirects=False) as logout_tab,
+        ThreadPoolExecutor(max_workers=1) as pool,
+    ):
+        initial = begin(callback, provider, "initial")
+        assert callback.get("/auth/callback", params=initial).status_code == 303
+        for name in (BROWSER_COOKIE, SESSION_COOKIE):
+            logout_tab.cookies.set(name, callback.cookies[name])
+        params = begin(callback, provider, "switch")
+        if logout_first:
+            provider.exchange_started, provider.resume = Event(), Event()
+            pending = pool.submit(callback.get, "/auth/callback", params=params)
+            try:
+                assert provider.exchange_started.wait(10)
+                assert logout_context(logout_tab).status_code == 303
+            finally:
+                provider.resume.set()
+            assert pending.result(timeout=10).status_code == 400
+        else:
+            hold_response.set()
+            pending = pool.submit(callback.get, "/auth/callback", params=params)
+            try:
+                assert response_waiting.wait(10)
+                assert callback.cookies[SESSION_COOKIE] == logout_tab.cookies[SESSION_COOKIE]
+                assert logout_context(logout_tab).status_code == 303
+            finally:
+                release_response.set()
+                hold_response.clear()
+            assert pending.result(timeout=10).status_code == 303
+        assert callback.get("/auth/session").status_code == 401
+        assert callback.get("/auth/edge-session").status_code == 401
+        assert callback.get("/auth/callback", params=params).status_code == 400
+    with db.session_factory() as session:
+        assert session.scalar(select(AppSession).where(AppSession.revoked_at.is_(None))) is None
+
+
+def test_new_login_supersedes_previous_generation(migrated_database):
+    provider = Provider()
+    app, db = build(migrated_database, provider)
+    with db.session_factory.begin() as session:
+        session.add(AppUser(issuer=ISSUER, subject="subject", role="admin", active=True))
+    with TestClient(app, base_url=ORIGIN, follow_redirects=False) as client:
+        first = begin(client, provider, "superseded")
+        latest = begin(client, provider, "latest")
+        assert client.get("/auth/callback", params=first).status_code == 400
+        assert client.get("/auth/callback", params=latest).status_code == 303
+        binding = client.get("/auth/session").json()["binding"]
+        headers = client.get("/auth/edge-session", headers={"X-RCTEC-Session": "forged"}).headers
+        assert headers["x-rctec-session"] == binding
+        query = {
+            "binding": binding,
+            "date_start": "2026-10-01",
+            "date_stop": "2026-10-02",
+            "format": "xlsx",
+            "dataset": "performance",
+        }
+        first_download = client.get("/downloads/report", params=query)
+        assert first_download.status_code == 200
+        assert first_download.headers["cache-control"] == "no-store"
+        next_login = begin(client, provider, "next")
+        assert client.get("/auth/callback", params=next_login).status_code == 303
+        assert client.get("/downloads/report", params=query).status_code == 403
+        assert logout_context(client).status_code == 303
+        assert client.get("/downloads/report", params=query).status_code == 401

@@ -155,27 +155,60 @@ Além dos privilégios da 4A.1, o papel da API precisa de INSERT em
 operacional separado para CLIs de status, reconciliação e manutenção, com
 acesso explícito às tabelas necessárias em cada operação.
 
-Exemplo de roteamento Caddy para revisão antes da ativação. Troque os nomes
-dos serviços pelos endereços privados do ambiente. Preserve os controles
-de origem e XSRF do Streamlit.
+## Fase 4B.1 — borda autenticada
 
-```caddyfile
-crm.example.invalid {
-    @auth_get {
-        method GET
-        path /auth/login /auth/callback /auth/logout
-    }
-    @auth_post {
-        method POST
-        path /auth/logout
-    }
-    @private path /api /api/* /auth /auth/* /health /docs /redoc /openapi.json
+Use o [Caddyfile do projeto](../deploy/Caddyfile) e fixe Streamlit 1.63.0.
+O início de outra tentativa, logout e emissão de sessão usam o mesmo bloqueio
+de contas. Logout cancela a geração do navegador e revoga todas as sessões
+desse contexto, inclusive uma sessão que acabou de ser emitida enquanto a
+resposta do callback ainda estava em trânsito. A sessão expira em até 30
+minutos absolutos. Não há renovação silenciosa. Ao suspender o acesso no
+Workspace, desative no CRM na mesma operação de desligamento.
 
-    route {
-        reverse_proxy @auth_get fastapi:8000
-        reverse_proxy @auth_post fastapi:8000
-        respond @private 404
-        reverse_proxy streamlit:8501
-    }
-}
+A migration `0009_browser_context` revoga as sessões anteriores e descarta
+tentativas OIDC antigas, preservando contas, leads e auditoria. O papel do
+FastAPI precisa também de SELECT/INSERT/UPDATE em `browser_contexts`.
+O papel de migrations executa a revisão; webhook, worker e CLIs mantêm
+papéis separados.
+
+Com Uvicorn criando os sockets, use um diretório de execução com acesso
+restrito ao operador e aos serviços. O comando antigo `iniciar.sh` é um
+atalho de desenvolvimento e fica fora da topologia do piloto.
+
+```bash
+export CRM_RUN_DIR=/caminho/privado/rctec-run
+mkdir -p -m 700 "$CRM_RUN_DIR"
+chmod 700 "$CRM_RUN_DIR"
+
+# Em terminais do mesmo ambiente, na raiz do projeto.
+PYTHONPATH=src .venv/bin/uvicorn meta_kpi_calc.api.app:app \
+  --uds "$CRM_RUN_DIR/api.sock" --no-access-log
+PYTHONPATH=src CRM_API_SOCKET="$CRM_RUN_DIR/api.sock" API_BASE_URL=http://localhost \
+  .venv/bin/uvicorn frontend.asgi:app --uds "$CRM_RUN_DIR/ui.sock" --no-access-log
+
+# Use a origem HTTPS autorizada, igual a OIDC_PUBLIC_ORIGIN.
+export CRM_SITE=https://crm.example.invalid
+export CRM_ORIGIN="$CRM_SITE"
+export CRM_API="unix/$CRM_RUN_DIR/api.sock"
+export CRM_STREAMLIT="unix/$CRM_RUN_DIR/ui.sock"
+caddy run --config deploy/Caddyfile
 ```
+
+O Caddy encaminha autenticação e downloads apenas pelas rotas exatas
+permitidas. A tela inicial para uma sessão ausente vem do FastAPI, antes de
+carregar Streamlit. O upgrade exige a origem exata e uma sessão válida. O
+Caddy remove o cabeçalho recebido do cliente e injeta um vínculo opaco
+exclusivo por sessão. A configuração do Streamlit usa esse valor ao decidir
+se pode reutilizar o estado. A borda bloqueia mídia, cache de mensagens,
+interfaces de automação e rotas não listadas. Os downloads têm autorização
+administrativa e vínculo com a sessão que gerou o link, além de no-store.
+
+O Caddy encerra túneis em até 30 segundos e valida a sessão novamente na
+reconexão. A revogação impede novas requisições à API, mas um WebSocket já
+aberto não é desconectado instantaneamente. Dados já recebidos pelo cliente
+não podem ser recolhidos. Evite logs de URI e cabeçalhos sensíveis, inclusive
+no Caddy, e teste o isolamento após cada atualização de Streamlit ou Caddy.
+
+Use TLS confiável para o teste no Chrome. Para um laboratório sem alterar a
+confiança do sistema, valide o certificado local explicitamente no cliente
+de teste HTTP/WebSocket. Não prossiga através de avisos de certificado.

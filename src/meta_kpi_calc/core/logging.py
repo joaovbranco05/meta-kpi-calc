@@ -34,10 +34,11 @@ def redact_text(value: str, secrets: Sequence[str] = ()) -> str:
                       rf"\1{REDACTED}", redacted)
     redacted = re.sub(r"(/auth/(?:callback|login))\?[^\s\"'<>]*", r"\1?[REDACTED]", redacted)
     redacted = re.sub(
-        r"(?i)((?:__Host-)?rctec_(?:session|oidc)\s*=)[^;\s,\"']+",
+        r"(?i)((?:__Host-)?rctec_(?:session|oidc|browser)\s*=)[^;\s,\"']+",
         rf"\1{REDACTED}",
         redacted,
     )
+    redacted = re.sub(r"(/downloads/[^?\s]+)\?[^\s\"'<>]*", r"\1?[REDACTED]", redacted)
     for secret in secrets:
         if secret:
             redacted = redacted.replace(secret, REDACTED)

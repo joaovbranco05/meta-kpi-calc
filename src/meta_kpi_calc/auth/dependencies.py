@@ -7,14 +7,23 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from meta_kpi_calc.api.dependencies import get_session
-from meta_kpi_calc.auth.models import AppSession, AppUser
+from meta_kpi_calc.auth.models import AppSession, AppUser, BrowserContext
 
 SessionDependency = Annotated[Session, Depends(get_session)]
 SESSION_COOKIE = "__Host-rctec_session"
+BROWSER_COOKIE = "__Host-rctec_browser"
+
+
+def valid_cookie(value: str) -> bool:
+    return re.fullmatch(r"[A-Za-z0-9_-]{43}", value) is not None
+
+
+def session_binding(token: str) -> str:
+    return hmac.new(token.encode(), b"rctec-streamlit-session-v1", hashlib.sha256).hexdigest()
 
 
 def session_digest(token: str) -> str:
@@ -38,22 +47,27 @@ def verify_csrf(request: Request, supplied: str, *, require_origin: bool = False
 def authenticate_session(request: Request, session: SessionDependency) -> AppUser:
     """Resolve a server-issued token; session issuance belongs to the OIDC phase."""
     token = request.cookies.get(SESSION_COOKIE, "")
-    if re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
+    if valid_cookie(token):
+        browser = request.cookies.get(BROWSER_COOKIE, "")
+        now = datetime.now(UTC)
         user = session.scalar(
             select(AppUser)
             .join(AppSession, AppSession.user_id == AppUser.id)
+            .outerjoin(BrowserContext, BrowserContext.digest == AppSession.browser_digest)
             .where(
                 AppUser.active.is_(True),
                 AppSession.token_digest == session_digest(token),
                 AppSession.revoked_at.is_(None),
-                AppSession.expires_at > datetime.now(UTC),
+                AppSession.expires_at > now,
+                or_(
+                    AppSession.browser_digest.is_(None),
+                    (BrowserContext.digest == session_digest(browser))
+                    & (BrowserContext.expires_at > now),
+                ),
             )
         )
         if user is not None:
-            if (
-                request.method not in {"GET", "HEAD", "OPTIONS"}
-                and request.scope["path"] != "/auth/logout"
-            ):
+            if request.method not in {"GET", "HEAD", "OPTIONS"}:
                 verify_csrf(request, request.headers.get("x-csrf-token", ""))
             return user
     raise HTTPException(401, "Authentication required")
