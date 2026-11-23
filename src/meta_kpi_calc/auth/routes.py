@@ -105,8 +105,7 @@ def login(request: Request, session: SessionDependency):
     return result
 
 
-@router.get("/callback")
-def callback(request: Request, session: SessionDependency):
+def verify_callback(request: Request, session: SessionDependency, *, expected_email=None):
     config, origin = config_for(request)
     query = request.query_params
     state, code = query.get("state", ""), query.get("code", "")
@@ -145,6 +144,7 @@ def callback(request: Request, session: SessionDependency):
                 verifier=flow.verifier,
                 nonce=flow.nonce,
                 redirect_uri=origin + "/auth/callback",
+                expected_email=expected_email,
             )
     except (httpx.HTTPError, jwt.PyJWTError, ValueError, KeyError, TypeError, AttributeError):
         raise HTTPException(401, "Corporate identity could not be verified") from None
@@ -153,6 +153,15 @@ def callback(request: Request, session: SessionDependency):
     _, context = load_browser(request, session, account_clock(session))
     if context is None or context.generation != flow.generation:
         raise HTTPException(400, "Invalid login transaction")
+    now = account_clock(session)
+    if min(utc(flow.expires_at), utc(context.expires_at)) <= now:
+        raise HTTPException(400, "Invalid login transaction")
+    return config, issuer, subject, flow, context
+
+
+@router.get("/callback")
+def callback(request: Request, session: SessionDependency):
+    config, issuer, subject, flow, context = verify_callback(request, session)
     user = session.scalar(
         select(AppUser).where(
             AppUser.issuer == issuer,

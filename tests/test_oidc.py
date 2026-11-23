@@ -369,3 +369,32 @@ def test_new_login_supersedes_previous_generation(migrated_database):
         assert client.get("/downloads/report", params=query).status_code == 403
         assert logout_context(client).status_code == 303
         assert client.get("/downloads/report", params=query).status_code == 401
+
+
+def test_workspace_identity_receipt(migrated_database, tmp_path):
+    from scripts.verify_workspace_identity import create_verifier
+
+    provider = Provider()
+    crm, db = build(migrated_database, provider)
+    receipt = tmp_path / "identity-admin.json"
+    verifier = create_verifier(
+        crm.state.settings,
+        "expected@workspace.invalid",
+        receipt,
+        transport=httpx.MockTransport(provider),
+    )
+    with TestClient(verifier, base_url=ORIGIN, follow_redirects=False) as client:
+        params = begin(client, provider, "wrong", email="other@workspace.invalid")
+        assert client.get("/auth/callback", params=params).status_code == 401
+        assert not receipt.exists()
+        params = begin(client, provider, "right", email="expected@workspace.invalid")
+        response = client.get("/auth/callback", params=params)
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        assert SESSION_COOKIE not in response.cookies
+        assert client.get("/auth/callback", params=params).status_code == 409
+    assert receipt.read_text() == '{"iss": "https://accounts.google.com", "sub": "subject"}\n'
+    assert receipt.stat().st_mode & 0o777 == 0o600
+    with db.session_factory() as session:
+        assert session.scalars(select(AppUser)).all() == []
+        assert session.scalars(select(AppSession)).all() == []

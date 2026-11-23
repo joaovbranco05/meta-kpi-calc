@@ -15,7 +15,7 @@ class InvalidIdentity(ValueError):
     pass
 
 
-def exchange_identity(http: httpx.Client, config, *, code, verifier, nonce, redirect_uri):
+def exchange_identity(http: httpx.Client, config, *, code, verifier, nonce, redirect_uri, expected_email=None):
     response = http.post(
         TOKEN_URL,
         data={
@@ -60,4 +60,8 @@ def exchange_identity(http: httpx.Client, config, *, code, verifier, nonce, redi
         or not 1 <= len(claims["sub"]) <= 255
     ):
         raise InvalidIdentity
+    if expected_email is not None:
+        email = claims.get("email")
+        if not isinstance(email, str) or email.casefold() != expected_email.casefold():
+            raise InvalidIdentity
     return ISSUER, claims["sub"]
