@@ -220,3 +220,9 @@ interno e opcional para os responsáveis. Validar o comprimento, restringir a
 edição ao administrador e usar o valor somente como rótulo. A identidade
 continua vinculada por `iss` e `sub`, que não devem aparecer como nomes no
 seletor. A migration, a alteração da API e os testes ficam para a Fase 5C.
+
+A listagem e a ficha comercial aceitam futuramente o campo opcional
+`assigned_user_display_name` em `LeadResponse`, derivado no servidor do
+responsável atual e disponível somente quando o solicitante puder ver o rótulo.
+Em 5C.1 o campo ainda não é enviado. A interface distingue «Sem responsável»
+de «Nome indisponível» sem tentar resolver IDs por outra rota.

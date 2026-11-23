@@ -6,6 +6,7 @@ import re
 from base64 import b64encode
 from datetime import date, timedelta
 from decimal import Decimal
+from html import escape
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -1022,8 +1023,6 @@ def _export(st: Any, filters: dict[str, str]) -> None:
 
 
 def _download_link(st: Any, endpoint: str, label: str, parameters: dict) -> None:
-    from html import escape
-
     params = urlencode({**parameters, "binding": st.session_state["download_binding"]}, doseq=True)
     href = escape(f"/downloads/{endpoint}?{params}", quote=True)
     st.html(f'<a href="{href}">{escape(label)}</a>')
@@ -1046,55 +1045,154 @@ def _auth_headers(token: str, browser: str) -> dict[str, str]:
     return {"Cookie": f"{SESSION_COOKIE}={token}; {BROWSER_COOKIE}={browser}"}
 
 
+def _lead_query_controls(st: Any, *, is_admin: bool) -> dict[str, str | bool]:
+    applied = st.session_state.get("crm_lead_filters", {})
+    with st.form("crm_lead_filters_form"):
+        with st.container(horizontal=True, vertical_alignment="bottom"):
+            query = st.text_input(
+                "Buscar lead", value=applied.get("query", ""), max_chars=128,
+                placeholder="Nome, e-mail ou telefone",
+            )
+            status = st.selectbox(
+                "Status", ("", *LEAD_STATUS_LABELS),
+                index=("", *LEAD_STATUS_LABELS).index(applied.get("commercial_status", "")),
+                format_func=lambda code: LEAD_STATUS_LABELS.get(code, "Todos os status"),
+            )
+            unassigned = False
+            if is_admin:
+                unassigned = st.selectbox(
+                    "Responsável", (False, True), index=int(applied.get("unassigned", False)),
+                    format_func=lambda value: "Sem responsável" if value else "Todos",
+                )
+            submitted = st.form_submit_button("Aplicar", type="primary")
+        if submitted:
+            filters = {
+                "query": query.strip(), "commercial_status": status, "unassigned": unassigned,
+            }
+            if filters != applied:
+                st.session_state["crm_lead_filters"] = filters
+                st.session_state["crm_leads_offset"] = 0
+            return filters
+    return applied
+
+
+def _lead_request_error(st: Any, error: dict | str | None, *, detail: bool = False) -> None:
+    code = error.get("status") if isinstance(error, dict) else error
+    if detail and code == "404":
+        st.warning("Este lead não está disponível.")
+    elif code == "403":
+        st.warning("Seu perfil não tem permissão para esta consulta.")
+    else:
+        st.error("Não foi possível carregar o lead." if detail else "Não foi possível carregar os leads.")
+        st.button("Tentar novamente")
+
+
+def _responsible_label(lead: dict[str, Any]) -> str:
+    if lead.get("assigned_user_id") is None:
+        return "Sem responsável"
+    label = lead.get("assigned_user_display_name")
+    return label.strip() if isinstance(label, str) and label.strip() else "Nome indisponível"
+
+
+def _lead_detail(st: Any, client: httpx.Client, lead_id: int, *, is_admin: bool) -> None:
+    if st.button("Voltar à lista", icon=":material/arrow_back:", type="tertiary"):
+        del st.session_state["crm_open_lead_id"]
+        st.rerun()
+
+    lead, error = _request_result(client, "GET", f"/api/crm/leads/{lead_id}")
+    if lead is None:
+        _lead_request_error(st, error, detail=True)
+        return
+
+    name = escape(lead.get("full_name") or "Lead sem nome")
+    status = lead["commercial_status"]
+    label = escape(LEAD_STATUS_LABELS.get(status, status))
+    st.html(f'<header class="crm-heading"><h1>{name}</h1><p>{label}</p></header>')
+
+    with st.container(horizontal=True, gap="medium"):
+        with st.container(width=320):
+            st.subheader("Contato")
+            st.caption("E-mail")
+            st.text(lead.get("email") or "—", width="stretch")
+            st.caption("Telefone")
+            st.text(lead.get("phone_number") or "—", width="stretch")
+
+        with st.container(width=320):
+            st.subheader("Interesse e origem")
+            st.caption("Curso")
+            st.text(lead.get("course") or "—", width="stretch")
+            if lead.get("source"):
+                st.caption("Origem")
+                st.text(lead["source"], width="stretch")
+            if lead.get("meta_campaign_name"):
+                st.caption("Campanha")
+                st.text(lead["meta_campaign_name"], width="stretch")
+            if is_admin or (lead.get("assigned_user_id") is not None
+                            and lead.get("assigned_user_display_name")):
+                st.caption("Responsável")
+                st.text(_responsible_label(lead), width="stretch")
+
+
 def _lead_list(st: Any, client: httpx.Client, title: str, *, is_admin: bool) -> None:
+    if (lead_id := st.session_state.get("crm_open_lead_id")) is not None:
+        _lead_detail(st, client, lead_id, is_admin=is_admin)
+        return
+
     st.html(
         f'<header class="crm-heading"><h1>{title}</h1><p>'
         f'{"Carteira comercial da RCTEC" if is_admin else "Sua carteira de atendimento"}'
         '</p></header>'
     )
+    filters = _lead_query_controls(st, is_admin=is_admin)
     limit = 25
     offset = st.session_state.get("crm_leads_offset", 0)
-    result, error = _request_result(
-        client, "GET", "/api/crm/leads", params={"offset": offset, "limit": limit},
-    )
-    if error is not None or result is None:
-        st.error("Não foi possível carregar os leads.")
-        st.button("Tentar novamente")
+    params = {"offset": offset, "limit": limit, **{k: v for k, v in filters.items() if v}}
+    result, error = _request_result(client, "GET", "/api/crm/leads", params=params)
+    if result is None:
+        _lead_request_error(st, error)
         return
     total = result["total"]
     if offset and offset >= total:
         st.session_state["crm_leads_offset"] = max(total - 1, 0) // limit * limit
         st.rerun()
     if not total:
-        st.info("Nenhum lead cadastrado." if is_admin else "Nenhum lead atribuído a você.")
+        if any(filters.values()):
+            st.info("Nenhum lead corresponde aos filtros.")
+        else:
+            st.info("Nenhum lead cadastrado." if is_admin else "Nenhum lead atribuído a você.")
         return
 
+    lead_ids = tuple(item["id"] for item in result["items"])
+    # A positional selection belongs only to the exact ordered API result.
+    table_signature = hashlib.sha256(repr((params, lead_ids)).encode()).hexdigest()
     rows = []
     for item in result["items"]:
         status = item["commercial_status"]
         row = {
-            "Lead": item["full_name"],
+            "Lead": item["full_name"] or "Lead sem nome",
             "Status": [LEAD_STATUS_LABELS.get(status, status)],
             "Curso": item.get("course") or "—",
         }
         if is_admin:
-            row["Distribuição"] = (
-                "Atribuído" if item.get("assigned_user_id") is not None else "Sem responsável"
-            )
+            row["Responsável"] = _responsible_label(item)
         rows.append(row)
-    st.dataframe(
+    selection = st.dataframe(
         rows,
         hide_index=True,
+        key=f"crm_leads_{table_signature}",
+        on_select="rerun",
+        selection_mode="single-row",
         row_height=37,
         width="stretch",
         column_config={
-            "Lead": st.column_config.TextColumn(width=175),
+            "Lead": st.column_config.TextColumn(width=160),
             "Status": st.column_config.MultiselectColumn(
-                width=125, options=tuple(LEAD_STATUS_LABELS.values()), color=LEAD_STATUS_COLORS,
+                width=112, options=tuple(LEAD_STATUS_LABELS.values()), color=LEAD_STATUS_COLORS,
             ),
-            "Distribuição": st.column_config.TextColumn(width=145),
+            "Responsável": st.column_config.TextColumn(width=145),
         },
     )
+    selected = selection.selection.rows
     with st.container(key="crm-pagination", horizontal=True, horizontal_alignment="distribute"):
         st.caption(f"{offset + 1}–{offset + len(rows)} de {total} leads")
         if total > limit:
@@ -1105,6 +1203,10 @@ def _lead_list(st: Any, client: httpx.Client, title: str, *, is_admin: bool) -> 
                 if st.button("Próxima", disabled=offset + limit >= total):
                     st.session_state["crm_leads_offset"] = offset + limit
                     st.rerun()
+        valid_selection = bool(selected) and 0 <= selected[0] < len(lead_ids)
+        if st.button("Abrir ficha", disabled=not valid_selection, type="primary"):
+            st.session_state["crm_open_lead_id"] = lead_ids[selected[0]]
+            st.rerun()
 
 
 def _commercial_navigation(st: Any, *, is_admin: bool) -> str:

@@ -46,7 +46,12 @@ def test_permissions_and_audit(migrated_database):
         ids = []
         for index, owner in enumerate((operator[0], other[0], None)):
             lead = ingest_lead(
-                session, LeadSubmission(str(index + 100), {"full_name": "Synthetic"})
+                session,
+                LeadSubmission(str(index + 100), {
+                    "full_name": "Synthetic",
+                    "email": f"lead{index}@example.invalid",
+                    "phone_number": f"4890000000{index}",
+                }),
             ).lead
             lead.assigned_user_id = owner
             ids.append(lead.id)
@@ -63,6 +68,15 @@ def test_permissions_and_audit(migrated_database):
         listed = client.get(crm, params={"query": "Synthetic", "limit": 1}).json()
         assert listed["total"] == 1
         assert [row["id"] for row in listed["items"]] == ids[:1]
+        for query in ("lead0@example.invalid", "48900000000"):
+            matching = client.get(crm, params={
+                "query": query, "commercial_status": "NEW", "limit": 25,
+            }).json()
+            assert matching["total"] == 1
+            assert [row["id"] for row in matching["items"]] == ids[:1]
+        for query in ("lead1@example.invalid", "48900000001"):
+            assert client.get(crm, params={"query": query}).json()["total"] == 0
+        assert client.get(crm, params={"query": "Synthetic", "commercial_status": "LOST"}).json()["total"] == 0
         assert client.get(crm, params={"query": "101"}).json()["total"] == 0
         assert client.get(crm, params={"offset": 1}).json()["total"] == 1
         assert client.get(crm, params={"unassigned": True}).status_code == 403
