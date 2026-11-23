@@ -4,12 +4,13 @@ import hashlib
 import os
 import re
 from base64 import b64encode
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from html import escape
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -28,6 +29,16 @@ LEAD_STATUS_LABELS = {
     "NO_RESPONSE": "Sem resposta",
     "LOST": "Perdido",
 }
+LEAD_ACTIVITY_LABELS = {
+    "IMPORTED": "Lead recebido",
+    "STATUS_CHANGED": "Status atualizado",
+    "NOTE": "Observação",
+    "CONTACT_ATTEMPTED": "Tentativa de contato",
+    "CONTACT_MADE": "Contato realizado",
+    "SOURCE_CORRECTED": "Origem corrigida",
+}
+LEAD_ORIGIN_LABELS = {"META_LEAD_ADS": "Meta Lead Ads"}
+COMMERCIAL_TIMEZONE = ZoneInfo("America/Sao_Paulo")
 PERIOD_OPTIONS = ("Este mês", "Mês anterior", "Últimos 7 dias", "Personalizado")
 
 KPI_CATALOG = (
@@ -1116,7 +1127,6 @@ def _assignee_names(st: Any, client: httpx.Client) -> None:
 
 
 def _lead_assignment(st: Any, client: httpx.Client, lead: dict[str, Any]) -> None:
-    st.subheader("Distribuição")
     current = lead["assigned_user_id"]
     st.text(_responsible_label(lead))
     candidates, error = _request_result(client, "GET", "/api/admin/users/assignees")
@@ -1125,7 +1135,8 @@ def _lead_assignment(st: Any, client: httpx.Client, lead: dict[str, Any]) -> Non
         return
     labels = {
         item["id"]: item["display_name"] + (" (administrador)" if item["role"] == "admin" else "")
-        for item in candidates if item["display_name"]
+        for item in sorted(candidates, key=lambda item: item["role"] == "admin")
+        if item["display_name"]
     }
     names = list(labels.values())
     if len(names) != len(set(names)) or len(labels) < len(candidates):
@@ -1137,7 +1148,7 @@ def _lead_assignment(st: Any, client: httpx.Client, lead: dict[str, Any]) -> Non
     with st.form(f"crm_assignment_{lead['id']}_{current}"):
         choice = st.selectbox(
             "Novo responsável", choices, index=None,
-            format_func=labels.__getitem__,
+            format_func=labels.__getitem__, placeholder="Selecione um responsável",
         )
         remove = st.checkbox("Retirar responsável") if current is not None else False
         confirmed = st.checkbox("Confirmo a alteração do responsável atual") if current is not None else True
@@ -1162,10 +1173,114 @@ def _lead_assignment(st: Any, client: httpx.Client, lead: dict[str, Any]) -> Non
     st.rerun()
 
 
+def _save_lead_care(
+    st: Any, client: httpx.Client, method: str, path: str, payload: dict, success: str,
+) -> None:
+    _, error = _request_result(client, method, path, json=payload)
+    code = error.get("status") if isinstance(error, dict) else error
+    messages = {
+        "403": "Seu perfil não tem permissão para esta operação.",
+        "404": "Este lead não está mais disponível.",
+        "409": "O lead mudou. Confira os dados atualizados antes de tentar novamente.",
+        "422": "Revise o conteúdo informado.",
+    }
+    notice = (
+        ("success", success) if error is None else
+        ("warning", messages.get(
+            code, "Não foi possível confirmar o salvamento. Confira o histórico antes de repetir.",
+        ))
+    )
+    st.session_state["crm_care_notice"] = notice
+    st.rerun()
+
+
+def _lead_care(st: Any, client: httpx.Client, lead: dict[str, Any]) -> None:
+    st.subheader("Atendimento")
+    lead_id = lead["id"]
+    path = f"/api/crm/leads/{lead_id}"
+    status = lead["commercial_status"]
+    generation = st.session_state.get("crm_activity_generation", 0)
+    with st.container(horizontal=True, gap="medium"):
+        with st.container(width=260):
+            with st.form(f"crm_status_{lead_id}_{status}"):
+                selected = st.selectbox(
+                    "Status comercial", tuple(LEAD_STATUS_LABELS),
+                    index=tuple(LEAD_STATUS_LABELS).index(status),
+                    format_func=LEAD_STATUS_LABELS.__getitem__,
+                )
+                save_status = st.form_submit_button("Salvar status")
+        with st.container(width=390):
+            with st.form(f"crm_activity_{lead_id}_{generation}"):
+                activity = st.selectbox(
+                    "Atividade", ("NOTE", "CONTACT_ATTEMPTED", "CONTACT_MADE"),
+                    format_func=LEAD_ACTIVITY_LABELS.__getitem__,
+                )
+                note = st.text_area("Observação", max_chars=4000, height=88)
+                save_activity = st.form_submit_button("Registrar atividade", type="primary")
+
+    if save_status:
+        if selected == status:
+            st.info("O lead já está com esse status.")
+        else:
+            _save_lead_care(
+                st, client, "PATCH", f"{path}/status",
+                {"commercial_status": selected}, "Status atualizado.",
+            )
+    if save_activity:
+        content = note.strip()
+        if (activity == "NOTE" and not content) or len(content) > 4000:
+            st.warning("Informe uma observação de até 4.000 caracteres.")
+        else:
+            # Retire o formulário submetido antes de enviar a escrita. Um
+            # evento antigo do mesmo botão não pertence ao próximo formulário.
+            st.session_state["crm_activity_generation"] = generation + 1
+            _save_lead_care(
+                st, client, "POST", f"{path}/activities",
+                {"activity_type": activity, "note": content or None}, "Atividade registrada.",
+            )
+
+
+def _lead_history(st: Any, client: httpx.Client, lead_id: int) -> None:
+    st.subheader("Histórico")
+    history, error = _request_result(client, "GET", f"/api/crm/leads/{lead_id}/activities")
+    if history is None:
+        _lead_request_error(st, error, detail=True)
+        return
+    if not history:
+        st.caption("Nenhuma atividade registrada.")
+        return
+
+    for entry in reversed(history):
+        kind = entry["activity_type"]
+        timestamp = datetime.fromisoformat(entry["created_at"])
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=UTC)
+        date_label = timestamp.astimezone(COMMERCIAL_TIMEZONE).strftime("%d/%m/%Y às %H:%M")
+        author = entry.get("actor_display_name") or (
+            "Sistema" if entry["actor_type"] == "SYSTEM_IMPORT" else "Equipe comercial"
+        )
+        with st.container(border=True, gap="xxsmall"):
+            st.markdown(f"**{LEAD_ACTIVITY_LABELS.get(kind, 'Atividade comercial')}**")
+            st.text(f"{date_label} · {author}", width="stretch")
+            if kind == "STATUS_CHANGED":
+                previous = LEAD_STATUS_LABELS.get(entry["previous_status"], "—")
+                current = LEAD_STATUS_LABELS.get(entry["new_status"], "—")
+                st.text(f"{previous} → {current}")
+            if entry.get("note"):
+                st.text(entry["note"], width="stretch")
+
+
 def _lead_detail(st: Any, client: httpx.Client, lead_id: int, *, is_admin: bool) -> None:
     if st.button("Voltar à lista", icon=":material/arrow_back:", type="tertiary"):
         del st.session_state["crm_open_lead_id"]
         st.rerun()
+
+    if notice := st.session_state.pop("crm_care_notice", None):
+        level, message = notice
+        if level == "success":
+            st.success(message)
+        else:
+            st.warning(message)
 
     lead, error = _request_result(client, "GET", f"/api/crm/leads/{lead_id}")
     if lead is None:
@@ -1181,32 +1296,31 @@ def _lead_detail(st: Any, client: httpx.Client, lead_id: int, *, is_admin: bool)
     name = escape(lead.get("full_name") or "Lead sem nome")
     status = lead["commercial_status"]
     label = escape(LEAD_STATUS_LABELS.get(status, status))
-    st.html(f'<header class="crm-heading"><h1>{name}</h1><p>{label}</p></header>')
+    course = escape(lead.get("course") or "Curso não informado")
+    st.html(f'<header class="crm-heading"><h1>{name}</h1><p>{label} · {course}</p></header>')
 
-    with st.container(horizontal=True, gap="medium"):
-        with st.container(width=320):
-            st.subheader("Contato")
-            st.caption("E-mail")
-            st.text(lead.get("email") or "—", width="stretch")
-            st.caption("Telefone")
-            st.text(lead.get("phone_number") or "—", width="stretch")
-
-        with st.container(width=320):
-            st.subheader("Interesse e origem")
-            st.caption("Curso")
-            st.text(lead.get("course") or "—", width="stretch")
-            if lead.get("source"):
-                st.caption("Origem")
-                st.text(lead["source"], width="stretch")
-            if lead.get("meta_campaign_name"):
-                st.caption("Campanha")
-                st.text(lead["meta_campaign_name"], width="stretch")
-            if not is_admin and lead.get("assigned_user_display_name"):
+    with st.expander("Contato e origem", expanded=True):
+        with st.container(horizontal=True):
+            with st.container(width=260, gap="xxsmall"):
+                st.caption("E-mail")
+                st.text(lead.get("email") or "—", width="stretch")
+                st.caption("Telefone")
+                st.text(lead.get("phone_number") or "—", width="stretch")
+            with st.container(width=300, gap="xxsmall"):
+                if origin := lead.get("source"):
+                    st.caption("Origem")
+                    st.text(LEAD_ORIGIN_LABELS.get(origin, "Outra origem"), width="stretch")
+                if lead.get("meta_campaign_name"):
+                    st.caption("Campanha")
+                    st.text(lead["meta_campaign_name"], width="stretch")
                 st.caption("Responsável")
                 st.text(_responsible_label(lead), width="stretch")
 
+    _lead_care(st, client, lead)
+    _lead_history(st, client, lead_id)
     if is_admin:
-        _lead_assignment(st, client, lead)
+        with st.expander("Distribuição"):
+            _lead_assignment(st, client, lead)
 
 
 def _lead_list(st: Any, client: httpx.Client, title: str, *, is_admin: bool) -> None:

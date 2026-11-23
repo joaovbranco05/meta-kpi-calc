@@ -173,3 +173,8 @@ class LeadActivity(Base):
     )
 
     lead: Mapped[Lead] = relationship(back_populates="activities")
+    actor_user: Mapped[AppUser | None] = relationship()
+
+    @property
+    def actor_display_name(self) -> str | None:
+        return self.actor_user.display_name if self.actor_user is not None else None

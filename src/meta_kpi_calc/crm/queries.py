@@ -58,6 +58,7 @@ def list_lead_activities(
     # inaccessible lead, using the same database snapshot for scope and data.
     statement = (
         select(Lead.id, LeadActivity)
+        .options(joinedload(LeadActivity.actor_user).load_only(AppUser.display_name))
         .outerjoin(LeadActivity, LeadActivity.lead_id == Lead.id)
         .where(Lead.id == lead_id)
         .order_by(LeadActivity.created_at, LeadActivity.id)

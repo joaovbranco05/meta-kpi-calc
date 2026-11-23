@@ -43,6 +43,7 @@ def test_permissions_and_audit(migrated_database):
         admin = _account(session, "admin", "admin")
         operator = _account(session, "usuario", "operator")
         other = _account(session, "usuario", "other")
+        session.get(AppUser, operator[0]).display_name = "Vendedor fictício"
         ids = []
         for index, owner in enumerate((operator[0], other[0], None)):
             lead = ingest_lead(
@@ -120,6 +121,11 @@ def test_permissions_and_audit(migrated_database):
             == 422
         )
         assert client.patch(f"{path}/status", json=status_body).status_code == 200
+        assert client.patch(f"{path}/status", json=status_body).status_code == 200
+        for invalid_note in ("  ", "x" * 4001):
+            assert client.post(f"{path}/activities", json={
+                "activity_type": "NOTE", "note": invalid_note,
+            }).status_code == 422
         note = {"activity_type": "NOTE", "note": "Synthetic note"}
         assert (
             client.post(f"{path}/activities", json=note | {"actor_user_id": admin[0]}).status_code
@@ -128,6 +134,8 @@ def test_permissions_and_audit(migrated_database):
         assert client.post(f"{path}/activities", json=note).json()["actor_user_id"] == operator[0]
         history = client.get(f"{path}/activities").json()
         assert [row["actor_user_id"] for row in history] == [None, operator[0], operator[0]]
+        assert [row["actor_display_name"] for row in history] == [None, "Vendedor fictício", "Vendedor fictício"]
+        assert [row["activity_type"] for row in history] == ["IMPORTED", "STATUS_CHANGED", "NOTE"]
 
         _login(client, admin)
         assert client.get("/api/campaigns").status_code == 200
@@ -146,6 +154,11 @@ def test_permissions_and_audit(migrated_database):
 
         _login(client, operator)
         assert client.get(path).status_code == 404
+        assert client.get(f"{path}/activities").status_code == 404
+        assert client.post(f"{path}/activities", json=note).status_code == 404
+        assert client.patch(f"{path}/status", json=status_body).status_code == 404
+        _login(client, other)
+        assert client.get(f"{path}/activities").json()[-1]["actor_display_name"] == "Vendedor fictício"
         _login(client, admin)
         assert (
             client.put(

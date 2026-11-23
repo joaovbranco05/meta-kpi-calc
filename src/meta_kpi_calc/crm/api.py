@@ -69,6 +69,7 @@ class ActivityResponse(CRMModel):
     actor_type: LeadActivityActor
     actor_id: str | None
     actor_user_id: int | None
+    actor_display_name: str | None
     previous_status: LeadStatus | None
     new_status: LeadStatus | None
     note: str | None

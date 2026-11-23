@@ -230,3 +230,16 @@ ambíguo precisam ser diferenciadas antes de aparecerem no seletor. O
 A atribuição aceita `expected_assigned_user_id` para detectar concorrência.
 Envie `null` se o lead estiver sem responsável. Se o responsável mudou, a API
 retorna `409`. Clientes existentes podem omitir a condição.
+
+### Atendimento na Fase 5C.3
+
+O status e o registro de atividades usam as rotas comerciais existentes. A API
+determina a autoria pela sessão e verifica a atribuição sob bloqueio antes de
+gravar. A consulta de histórico retorna `actor_display_name` quando a conta
+autora tem rótulo configurado, no mesmo escopo SQL do histórico. Atividades
+anteriores sem autor autenticado continuam disponíveis.
+
+O formulário de atividade é substituído após o envio para evitar o reenvio
+do mesmo evento da interface. O POST ainda não tem chave de idempotência.
+Em caso de resposta incerta, consulte o histórico antes de repetir. O envio
+de uma mesma nota em duas abas pode gravar duas atividades distintas.
