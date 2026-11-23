@@ -1,0 +1,82 @@
+:root {
+    --crm-brand: #2e4c6c;
+    --crm-ink: #0f172a;
+    --crm-muted: #526579;
+    --crm-line: #e2e8f0;
+    --crm-selected: #e7eef5;
+}
+
+.crm-logo {
+    display: block;
+    width: 148px;
+    max-width: 100%;
+    height: auto;
+    margin: 0 0 0.5rem 0.625rem;
+}
+
+.st-key-crm-nav button {
+    width: fit-content;
+    justify-content: flex-start;
+    min-height: 2.375rem;
+    padding: 0.4rem 0.625rem;
+    color: var(--crm-muted);
+}
+
+.st-key-crm-nav button:hover {
+    background: #eff4f8;
+    color: var(--crm-brand);
+}
+
+.st-key-crm-nav [class*="st-key-crm-nav-active-"] {
+    width: 100%;
+    background: var(--crm-selected);
+    border-radius: 0.375rem;
+}
+
+.st-key-crm-nav [class*="st-key-crm-nav-active-"] button {
+    background: transparent;
+    border-color: transparent;
+    color: var(--crm-brand);
+    font-weight: 650;
+}
+
+.st-key-crm-nav button:focus-visible,
+.crm-account a:focus-visible {
+    outline: 2px solid var(--crm-brand);
+    outline-offset: 2px;
+}
+
+.crm-account {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+    border-top: 1px solid var(--crm-line);
+    padding: 0.75rem 0.625rem 0;
+}
+
+.crm-account a,
+.crm-account a:visited {
+    color: var(--crm-brand);
+    font-size: 0.875rem;
+    text-decoration: none;
+}
+
+.crm-account a:hover {
+    text-decoration: underline;
+}
+
+.crm-heading h1 {
+    color: var(--crm-ink);
+    font-size: clamp(1.5rem, 2.2vw, 1.875rem);
+    font-weight: 650;
+    line-height: 1.2;
+    letter-spacing: -0.025em;
+    margin: 0;
+    padding: 0;
+}
+
+.crm-heading p {
+    color: var(--crm-muted);
+    font-size: 0.875rem;
+    margin: 0.4rem 0 0;
+}
