@@ -212,3 +212,11 @@ no Caddy, e teste o isolamento após cada atualização de Streamlit ou Caddy.
 Use TLS confiável para o teste no Chrome. Para um laboratório sem alterar a
 confiança do sistema, valide o certificado local explicitamente no cliente
 de teste HTTP/WebSocket. Não prossiga através de avisos de certificado.
+
+### Nome de exibição na Fase 5C
+
+A próxima etapa da distribuição comercial poderá incluir um `display_name`
+interno e opcional para os responsáveis. Validar o comprimento, restringir a
+edição ao administrador e usar o valor somente como rótulo. A identidade
+continua vinculada por `iss` e `sub`, que não devem aparecer como nomes no
+seletor. A migration, a alteração da API e os testes ficam para a Fase 5C.

@@ -3,8 +3,10 @@
 import hashlib
 import os
 import re
+from base64 import b64encode
 from datetime import date, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
@@ -14,6 +16,15 @@ from meta_kpi_calc.auth.dependencies import BROWSER_COOKIE, SESSION_COOKIE
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 EFFECTIVE_STATUS_OPTIONS = ("", "ACTIVE", "PAUSED", "ARCHIVED", "DELETED", "DISABLED")
+LOGO_PATH = Path(__file__).with_name("assets") / "logo_rctec.png"
+LEAD_STATUS_LABELS = {
+    "NEW": "Novo",
+    "CONTACTED": "Contatado",
+    "INTERESTED": "Interessado",
+    "ENROLLED": "Matriculado",
+    "NO_RESPONSE": "Sem resposta",
+    "LOST": "Perdido",
+}
 PERIOD_OPTIONS = ("Este mês", "Mês anterior", "Últimos 7 dias", "Personalizado")
 
 KPI_CATALOG = (
@@ -1033,11 +1044,60 @@ def _auth_headers(token: str, browser: str) -> dict[str, str]:
     return {"Cookie": f"{SESSION_COOKIE}={token}; {BROWSER_COOKIE}={browser}"}
 
 
+def _lead_list(st: Any, client: httpx.Client, title: str, *, is_admin: bool) -> None:
+    st.title(title)
+    st.caption("Carteira comercial da RCTEC" if is_admin else "Sua carteira de atendimento")
+    limit = 25
+    offset = st.session_state.get("crm_leads_offset", 0)
+    result, error = _request_result(
+        client, "GET", "/api/crm/leads", params={"offset": offset, "limit": limit},
+    )
+    if error is not None or result is None:
+        st.error("Não foi possível carregar os leads.")
+        st.button("Tentar novamente")
+        return
+    total = result["total"]
+    if offset and offset >= total:
+        st.session_state["crm_leads_offset"] = max(total - 1, 0) // limit * limit
+        st.rerun()
+    if not total:
+        st.info("Nenhum lead cadastrado." if is_admin else "Nenhum lead atribuído a você.")
+        return
+
+    rows = []
+    for item in result["items"]:
+        status = item["commercial_status"]
+        row = {
+            "Lead": item["full_name"],
+            "Status": LEAD_STATUS_LABELS.get(status, status),
+            "Curso": item.get("course") or "—",
+        }
+        if is_admin:
+            row["Distribuição"] = (
+                "Atribuído" if item.get("assigned_user_id") is not None else "Sem responsável"
+            )
+        rows.append(row)
+    st.dataframe(
+        rows,
+        hide_index=True,
+        width="stretch",
+        column_config={"Status": st.column_config.TextColumn(width=115)},
+    )
+    st.caption(f"{offset + 1}–{offset + len(rows)} de {total} leads")
+    if total > limit:
+        previous, following = st.columns(2)
+        if previous.button("Anterior", disabled=offset == 0):
+            st.session_state["crm_leads_offset"] = offset - limit
+            st.rerun()
+        if following.button("Próxima", disabled=offset + limit >= total):
+            st.session_state["crm_leads_offset"] = offset + limit
+            st.rerun()
+
+
 def main() -> None:
     import streamlit as st
 
-    st.set_page_config(page_title="Meta KPI Calculator", layout="wide")
-    st.title("Meta KPI Calculator")
+    st.set_page_config(page_title="Mini-CRM RCTEC", layout="wide")
     token = st.context.cookies.get(SESSION_COOKIE, "")
     headers = _auth_headers(token, st.context.cookies.get(BROWSER_COOKIE, ""))
     if not headers:
@@ -1075,20 +1135,30 @@ def main() -> None:
             st.session_state["identity"] = fingerprint
         st.session_state["download_binding"] = identity["binding"]
         client.headers["X-CSRF-Token"] = identity["csrf"]
-        st.html('<a href="/auth/logout" target="_self">Sair</a> · '
-                '<a href="/auth/login" target="_self">Trocar conta</a>')
         check_session()
-        if identity["role"] == "usuario":
-            page = _request(client, "GET", "/api/crm/leads")
-            st.subheader("Meus leads")
-            if page and page["items"]:
-                st.dataframe([
-                    {"Nome": item["full_name"], "Status": item["commercial_status"]}
-                    for item in page["items"]
-                ])
+        is_admin = identity["role"] == "admin"
+        with st.sidebar:
+            logo = b64encode(LOGO_PATH.read_bytes()).decode("ascii")
+            st.html(
+                f'<img src="data:image/png;base64,{logo}" '
+                'alt="Escola Técnica RCTEC" style="display:block;width:168px;max-width:100%;height:auto">'
+            )
+            st.divider()
+            if is_admin:
+                section = st.radio(
+                    "Navegação", ("Leads", "Analytics"), label_visibility="collapsed",
+                )
             else:
-                st.info("Nenhum lead disponível.")
+                section = "Meus leads"
+                st.markdown("**Meus leads**")
+            st.divider()
+            st.html('<a href="/auth/logout" target="_self">Sair</a> · '
+                    '<a href="/auth/login" target="_self">Trocar conta</a>')
+        if section != "Analytics":
+            _lead_list(st, client, section, is_admin=is_admin)
             return
+
+        st.title("Analytics")
         health = _request(client, "GET", "/health")
         if health and health.get("mode") == "demo":
             st.info("Modo demonstração: os dados exibidos são fictícios.")

@@ -5,3 +5,21 @@ trustedUserHeaders = '{"X-RCTEC-Session":"rctec_session"}'
 
 [browser]
 gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+base = "light"
+primaryColor = "#2E4C6C"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F8FAFC"
+textColor = "#0F172A"
+borderColor = "#E2E8F0"
+blueColor = "#3089A8"
+blueBackgroundColor = "#9DDBE9"
+linkColor = "#2E4C6C"
+font = "sans-serif"
+baseRadius = "0.375rem"
+showWidgetBorder = true
+showSidebarBorder = true
