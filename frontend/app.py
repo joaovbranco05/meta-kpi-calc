@@ -3,23 +3,23 @@
 import hashlib
 import os
 import re
-from base64 import b64encode
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from html import escape
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import httpx
 
 from meta_kpi_calc.auth.dependencies import BROWSER_COOKIE, SESSION_COOKIE
+from meta_kpi_calc.auth.presentation import logo_data_uri
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 EFFECTIVE_STATUS_OPTIONS = ("", "ACTIVE", "PAUSED", "ARCHIVED", "DELETED", "DISABLED")
 ASSETS = Path(__file__).with_name("assets")
-LOGO_PATH = ASSETS / "logo_rctec_transparente.png"
 LEAD_STATUS_COLORS = ("#BBD4E8", "#BDE0E7", "#C9E1D2", "#B9DEC7", "#F1DBA8", "#E9C9CF")
 LEAD_STATUS_LABELS = {
     "NEW": "Novo",
@@ -1036,11 +1036,13 @@ def _export(st: Any, filters: dict[str, str]) -> None:
 def _download_link(st: Any, endpoint: str, label: str, parameters: dict) -> None:
     params = urlencode({**parameters, "binding": st.session_state["download_binding"]}, doseq=True)
     href = escape(f"/downloads/{endpoint}?{params}", quote=True)
-    st.html(f'<a href="{href}">{escape(label)}</a>')
+    st.html(f'<a class="crm-report-link" href="{href}">{escape(label)}</a>')
 
 
 def _login_screen(st: Any) -> None:
     st.session_state.clear()
+    st.title("Portal Comercial")
+    st.caption("Acesso restrito à equipe autorizada da RCTEC.")
     st.html('<a href="/auth/login" target="_self">Entrar com Google Workspace</a>')
 
 
@@ -1194,12 +1196,36 @@ def _save_lead_care(
     st.rerun()
 
 
+def _submit_activity(st: Any, client: httpx.Client, path: str, pending_key: str) -> None:
+    operation = st.session_state[pending_key]
+    _, error = _request_result(
+        client, "POST", f"{path}/activities", json=operation["payload"],
+        headers={"Idempotency-Key": operation["key"]},
+    )
+    code = error.get("status") if isinstance(error, dict) else error
+    if error is None or code in {"403", "404", "409", "422"}:
+        del st.session_state[pending_key]
+    messages = {
+        "403": "Seu perfil não tem permissão para registrar a atividade.",
+        "404": "Este lead não está mais disponível.",
+        "409": "A tentativa já foi usada com outros dados. Confira o histórico.",
+        "422": "Revise o conteúdo informado.",
+    }
+    st.session_state["crm_care_notice"] = (
+        ("success", "Atividade registrada.") if error is None
+        else ("warning", messages.get(code, "Resposta incerta. Use a opção de reenviar a mesma atividade."))
+    )
+    st.rerun()
+
+
 def _lead_care(st: Any, client: httpx.Client, lead: dict[str, Any]) -> None:
     st.subheader("Atendimento")
     lead_id = lead["id"]
     path = f"/api/crm/leads/{lead_id}"
     status = lead["commercial_status"]
     generation = st.session_state.get("crm_activity_generation", 0)
+    pending_key = f"crm_pending_activity_{lead_id}"
+    save_activity = False
     with st.container(horizontal=True, gap="medium"):
         with st.container(width=260):
             with st.form(f"crm_status_{lead_id}_{status}"):
@@ -1209,14 +1235,22 @@ def _lead_care(st: Any, client: httpx.Client, lead: dict[str, Any]) -> None:
                     format_func=LEAD_STATUS_LABELS.__getitem__,
                 )
                 save_status = st.form_submit_button("Salvar status")
-        with st.container(width=390):
-            with st.form(f"crm_activity_{lead_id}_{generation}"):
-                activity = st.selectbox(
-                    "Atividade", ("NOTE", "CONTACT_ATTEMPTED", "CONTACT_MADE"),
-                    format_func=LEAD_ACTIVITY_LABELS.__getitem__,
-                )
-                note = st.text_area("Observação", max_chars=4000, height=88)
-                save_activity = st.form_submit_button("Registrar atividade", type="primary")
+        with st.container(width=550):
+            if pending_key in st.session_state:
+                st.caption("Há uma atividade aguardando confirmação.")
+                if st.button("Reenviar a mesma atividade", type="primary"):
+                    _submit_activity(st, client, path, pending_key)
+            else:
+                with st.form(f"crm_activity_{lead_id}_{generation}"):
+                    activity = st.selectbox(
+                        "Atividade", ("NOTE", "CONTACT_ATTEMPTED", "CONTACT_MADE"),
+                        format_func=LEAD_ACTIVITY_LABELS.__getitem__,
+                    )
+                    note = st.text_area(
+                        "Observação", max_chars=4000, height=88,
+                        placeholder="Registre o que foi combinado ou o próximo passo.",
+                    )
+                    save_activity = st.form_submit_button("Registrar atividade", type="primary")
 
     if save_status:
         if selected == status:
@@ -1231,13 +1265,11 @@ def _lead_care(st: Any, client: httpx.Client, lead: dict[str, Any]) -> None:
         if (activity == "NOTE" and not content) or len(content) > 4000:
             st.warning("Informe uma observação de até 4.000 caracteres.")
         else:
-            # Retire o formulário submetido antes de enviar a escrita. Um
-            # evento antigo do mesmo botão não pertence ao próximo formulário.
             st.session_state["crm_activity_generation"] = generation + 1
-            _save_lead_care(
-                st, client, "POST", f"{path}/activities",
-                {"activity_type": activity, "note": content or None}, "Atividade registrada.",
-            )
+            st.session_state[pending_key] = {
+                "key": str(uuid4()), "payload": {"activity_type": activity, "note": content or None},
+            }
+            _submit_activity(st, client, path, pending_key)
 
 
 def _lead_history(st: Any, client: httpx.Client, lead_id: int) -> None:
@@ -1259,9 +1291,10 @@ def _lead_history(st: Any, client: httpx.Client, lead_id: int) -> None:
         author = entry.get("actor_display_name") or (
             "Sistema" if entry["actor_type"] == "SYSTEM_IMPORT" else "Equipe comercial"
         )
-        with st.container(border=True, gap="xxsmall"):
-            st.markdown(f"**{LEAD_ACTIVITY_LABELS.get(kind, 'Atividade comercial')}**")
-            st.text(f"{date_label} · {author}", width="stretch")
+        with st.container(border=False, gap="xxsmall"):
+            title = escape(LEAD_ACTIVITY_LABELS.get(kind, "Atividade comercial"))
+            meta = escape(f"{date_label} · {author}")
+            st.html(f'<p class="crm-history-heading"><strong>{title}</strong> <small>{meta}</small></p>')
             if kind == "STATUS_CHANGED":
                 previous = LEAD_STATUS_LABELS.get(entry["previous_status"], "—")
                 current = LEAD_STATUS_LABELS.get(entry["new_status"], "—")
@@ -1284,6 +1317,8 @@ def _lead_detail(st: Any, client: httpx.Client, lead_id: int, *, is_admin: bool)
 
     lead, error = _request_result(client, "GET", f"/api/crm/leads/{lead_id}")
     if lead is None:
+        if error in ("403", "404") or isinstance(error, dict) and error.get("status") in {"403", "404"}:
+            st.session_state.pop(f"crm_pending_activity_{lead_id}", None)
         _lead_request_error(st, error, detail=True)
         return
 
@@ -1317,10 +1352,10 @@ def _lead_detail(st: Any, client: httpx.Client, lead_id: int, *, is_admin: bool)
                 st.text(_responsible_label(lead), width="stretch")
 
     _lead_care(st, client, lead)
-    _lead_history(st, client, lead_id)
     if is_admin:
         with st.expander("Distribuição"):
             _lead_assignment(st, client, lead)
+    _lead_history(st, client, lead_id)
 
 
 def _lead_list(st: Any, client: httpx.Client, title: str, *, is_admin: bool) -> None:
@@ -1408,9 +1443,8 @@ def _commercial_navigation(st: Any, *, is_admin: bool) -> str:
     )
     active = st.session_state.get("crm_section", options[0][0])
     with st.sidebar:
-        logo = b64encode(LOGO_PATH.read_bytes()).decode("ascii")
         st.html(
-            f'<img class="crm-logo" src="data:image/png;base64,{logo}" '
+            f'<img class="crm-logo" src="{logo_data_uri()}" '
             'alt="Escola Técnica RCTEC">'
         )
         with st.container(key="crm-nav", gap="xxsmall"):
@@ -1483,7 +1517,7 @@ def main() -> None:
             _lead_list(st, client, section, is_admin=is_admin)
             return
 
-        st.title("Analytics")
+        st.html('<header class="crm-heading"><h1>Analytics</h1></header>')
         health = _request(client, "GET", "/health")
         if health and health.get("mode") == "demo":
             st.info("Modo demonstração: os dados exibidos são fictícios.")

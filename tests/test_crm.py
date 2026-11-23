@@ -214,6 +214,7 @@ def test_crm_api_lists_and_updates_as_admin(migrated_database) -> None:
         assert changed.json()["commercial_status"] == "LOST"
         created = client.post(
             f"/api/crm/leads/{lead_id}/activities",
+            headers={"Idempotency-Key": "4e2fba70-26ec-4088-8335-004d5638693e"},
             json={"activity_type": "NOTE", "note": "Synthetic note"},
         )
         assert created.status_code == 201

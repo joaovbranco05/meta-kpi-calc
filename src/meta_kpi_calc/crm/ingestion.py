@@ -130,6 +130,7 @@ def add_lead_activity(
     note: str | None,
     *,
     actor_user_id: int | None = None,
+    idempotency_key: str | None = None,
 ) -> LeadActivity:
     if activity_type not in {
         LeadActivityType.NOTE,
@@ -143,6 +144,7 @@ def add_lead_activity(
         actor_type=LeadActivityActor.LOCAL_OPERATOR,
         note=note,
         actor_user_id=actor_user_id,
+        idempotency_key=idempotency_key,
     )
     session.add(activity)
     if activity_type == LeadActivityType.CONTACT_MADE:

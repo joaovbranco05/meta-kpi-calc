@@ -26,6 +26,7 @@ from meta_kpi_calc.auth.dependencies import (
 )
 from meta_kpi_calc.auth.models import AppSession, AppUser, BrowserContext, OIDCFlow
 from meta_kpi_calc.auth.oidc import AUTHORIZE, exchange_identity
+from meta_kpi_calc.auth.presentation import ENTRY_CSP, entry_page
 
 router = APIRouter(prefix="/auth")
 BROWSER_SECONDS = 86400
@@ -222,14 +223,11 @@ def logout_form(request: Request, session: SessionDependency):
         return RedirectResponse("/", status_code=303)
     token = csrf_token(cookie)
     return HTMLResponse(
-        '<!doctype html><html lang="pt-BR"><meta charset="utf-8"><title>Sair do CRM</title>'
-        '<form method="post" action="/auth/logout">'
-        f'<input type="hidden" name="csrf" value="{token}">'
-        '<button type="submit">Confirmar saída</button></form></html>',
+        entry_page(logout_token=token),
         headers={
             **PRIVATE_HEADERS,
             "Referrer-Policy": "same-origin",
-            "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'",
+            "Content-Security-Policy": ENTRY_CSP,
         },
     )
 
@@ -299,10 +297,9 @@ def edge_entry(request: Request, session: SessionDependency):
         if error.status_code != 401:
             raise
         return HTMLResponse(
-            '<!doctype html><html lang="pt-BR"><meta charset="utf-8"><title>Mini-CRM RCTEC</title>'
-            '<h1>Mini-CRM RCTEC</h1><a href="/auth/login">Entrar com Google Workspace</a></html>',
+            entry_page(),
             status_code=401,
-            headers=PRIVATE_HEADERS,
+            headers={**PRIVATE_HEADERS, "Content-Security-Policy": ENTRY_CSP},
         )
     return HTMLResponse("", status_code=204, headers=PRIVATE_HEADERS)
 

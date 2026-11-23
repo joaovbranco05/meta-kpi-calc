@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Annotated
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Header, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import update
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from meta_kpi_calc.auth.admin import lock_user_management
 from meta_kpi_calc.auth.dependencies import CurrentAdmin, CurrentUser, SessionDependency
@@ -15,6 +17,7 @@ from meta_kpi_calc.auth.models import AdminAudit, AppUser
 from meta_kpi_calc.crm.ingestion import add_lead_activity, change_lead_status
 from meta_kpi_calc.crm.models import (
     Lead,
+    LeadActivity,
     LeadActivityActor,
     LeadActivityType,
     LeadStatus,
@@ -188,15 +191,35 @@ def list_activities(lead_id: int, session: SessionDependency, user: CurrentUser)
 
 
 @router.post("/leads/{lead_id}/activities", response_model=ActivityResponse, status_code=status.HTTP_201_CREATED)
-def create_activity(lead_id: int, payload: ActivityCreate, session: SessionDependency, user: CurrentUser) -> ActivityResponse:
+def create_activity(
+    lead_id: int, payload: ActivityCreate, session: SessionDependency, user: CurrentUser,
+    operation_id: Annotated[UUID, Header(alias="Idempotency-Key")],
+) -> ActivityResponse:
     lead = _scoped_lead(session, lead_id, user, writing=True)
-    try:
-        activity = add_lead_activity(session, lead, payload.activity_type, payload.note, actor_user_id=user.id)
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    return ActivityResponse.model_validate(activity, from_attributes=True)
+    key = str(operation_id)
+    lookup = select(LeadActivity).where(LeadActivity.idempotency_key == key)
+    activity = session.scalar(lookup)
+    if activity is None:
+        try:
+            with session.begin_nested():
+                activity = add_lead_activity(
+                    session, lead, payload.activity_type, payload.note,
+                    actor_user_id=user.id, idempotency_key=key,
+                )
+        except IntegrityError:
+            # A competing request on a different lead can race the lookup.
+            # The unique index decides the winner without releasing our lead lock.
+            activity = session.scalar(lookup)
+            if activity is None:
+                raise
+
+    if (activity.lead_id, activity.actor_user_id, activity.activity_type, activity.note) != (
+        lead_id, user.id, payload.activity_type, payload.note,
+    ):
+        raise HTTPException(409, "Idempotency key already used")
+    result = ActivityResponse.model_validate(activity, from_attributes=True)
+    session.commit()
+    return result
 
 
 class AssignmentPatch(CRMModel):

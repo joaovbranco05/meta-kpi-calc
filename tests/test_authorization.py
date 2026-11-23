@@ -5,6 +5,7 @@ import secrets
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Barrier
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -58,6 +59,7 @@ def test_permissions_and_audit(migrated_database):
             ids.append(lead.id)
 
     with TestClient(create_app(settings)) as client:
+        client.headers["Idempotency-Key"] = str(uuid4())
         crm = "/api/crm/leads"
         users = "/api/admin/users"
         forged = {"X-User-Id": str(admin[0]), "X-Role": "admin", "Authorization": "Bearer admin"}
@@ -379,3 +381,112 @@ def test_named_distribution(migrated_database):
         assert [event.action for event in events] == ["display_name_updated"] * 2 + ["lead_assigned"] * 3
         assert events[0].new_value == "Vendedor A"
         assert events[-1].previous_value == str(second[0]) and events[-1].new_value is None
+
+
+def test_activity_operation_replay(migrated_database):
+    from fastapi.responses import Response
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from meta_kpi_calc.crm import api
+
+    settings, database = migrated_database
+    with database.session_factory.begin() as session:
+        admin = _account(session, "admin", "admin")
+        seller = _account(session, "usuario", "seller")
+        other = _account(session, "usuario", "other")
+        lead = ingest_lead(session, LeadSubmission("602", {"full_name": "Synthetic"})).lead
+        lead.assigned_user_id = seller[0]
+        lead_id = lead.id
+
+    app = create_app(settings)
+    path = f"/api/crm/leads/{lead_id}/activities"
+    lost_key = str(uuid4())
+    key = {"Idempotency-Key": lost_key}
+    note = {"activity_type": "NOTE", "note": "Nota fictícia"}
+    lost = False
+
+    @app.middleware("http")
+    async def lose_first_response(request, call_next):
+        nonlocal lost
+        response = await call_next(request)
+        if request.headers.get("Idempotency-Key") == lost_key and response.status_code == 201 and not lost:
+            lost = True
+            return Response(status_code=502)
+        return response
+
+    with TestClient(app) as client:
+        _login(client, seller)
+        assert client.post(path, json=note).status_code == 422
+        assert client.post(path, json=note, headers=key).status_code == 502
+        first = client.post(path, json=note, headers=key)
+        assert first.status_code == 201
+        assert first.json()["actor_user_id"] == seller[0]
+        assert client.post(path, json=note, headers=key).json() == first.json()
+        assert client.post(path, json={**note, "note": "Outra"}, headers=key).status_code == 409
+        new_key = {"Idempotency-Key": str(uuid4())}
+        assert client.post(path, json=note, headers=new_key).json()["id"] != first.json()["id"]
+        assert len(client.get(path).json()) == 3
+
+        failed_key = {"Idempotency-Key": str(uuid4())}
+        add = api.add_lead_activity
+
+        def fail_after_flush(*args, **kwargs):
+            add(*args, **kwargs)
+            raise SQLAlchemyError("Synthetic write failure after flush")
+
+        from unittest.mock import patch
+        with patch.object(api, "add_lead_activity", fail_after_flush):
+            assert client.post(path, json=note, headers=failed_key).status_code == 503
+        assert len(client.get(path).json()) == 3
+        assert client.post(path, json=note, headers=failed_key).status_code == 201
+
+        _login(client, admin)
+        assert client.patch(path.rsplit("/", 1)[0] + "/assignment",
+                            json={"assigned_user_id": other[0]}).status_code == 200
+        _login(client, seller)
+        assert client.post(path, json=note, headers=key).status_code == 404
+        _login(client, other)
+        assert client.post(path, json=note, headers=key).status_code == 409
+        _login(client, admin)
+        assert client.put(f"/api/admin/users/{seller[0]}",
+                          json={"role": "usuario", "active": False}).status_code == 200
+        _login(client, seller)
+        assert client.post(path, json=note, headers=key).status_code == 401
+
+
+def test_activity_operation_concurrent(migrated_database):
+    settings, database = migrated_database
+    with database.session_factory.begin() as session:
+        admin = _account(session, "admin", "admin")
+        leads = [
+            ingest_lead(session, LeadSubmission(str(620 + i), {"full_name": "Synthetic"})).lead.id
+            for i in range(2)
+        ]
+
+    app = create_app(settings)
+
+    def submit(lead_ids):
+        barrier = Barrier(2)
+        headers = {"Idempotency-Key": str(uuid4())}
+
+        def send(lead_id):
+            with TestClient(app) as client:
+                _login(client, admin)
+                barrier.wait(timeout=10)
+                response = client.post(
+                    f"/api/crm/leads/{lead_id}/activities",
+                    headers=headers, json={"activity_type": "NOTE", "note": "Synthetic"},
+                )
+                return response.status_code, response.json().get("id")
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            return list(pool.map(send, lead_ids))
+
+    first, second = submit([leads[0], leads[0]])
+    assert first[0] == 201 and first == second
+    first, second = submit(leads)
+    assert sorted([first[0], second[0]]) == [201, 409]
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(LeadActivity).where(
+            LeadActivity.activity_type == "NOTE",
+        )) == 2

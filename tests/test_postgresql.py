@@ -102,7 +102,7 @@ def test_schema_and_upgrade_idempotent(pg_database):
     settings, database = pg_database
     with database.engine.connect() as connection:
         assert int(connection.scalar(text("SHOW server_version_num"))) // 10000 == 17
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0010_user_display_name"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0011_activity_idempotency"
     env = os.environ.copy()
     url = make_url(settings.demo_database_url).set(password="synthetic%:password")
     env.update(DEMO_MODE="true", DATABASE_URL=settings.database_url,
@@ -248,6 +248,8 @@ def test_standalone_postgresql_write_failure_returns_503(pg_database):
 @pytest.mark.parametrize("check", [
     test_authorization.test_permissions_and_audit,
     test_authorization.test_named_distribution,
+    test_authorization.test_activity_operation_replay,
+    test_authorization.test_activity_operation_concurrent,
     test_authorization.test_expired_and_inactive_sessions,
     test_authorization.test_concurrent_admin_deactivation_keeps_one_active,
 ])
@@ -347,7 +349,10 @@ def test_reassignment_commits_before_scoped_operation(pg_database, operation):
             calls = {
                 "history": ("GET", "/activities", {}),
                 "status": ("PATCH", "/status", {"json": {"commercial_status": "LOST"}}),
-                "note": ("POST", "/activities", {"json": {"activity_type": "NOTE", "note": "Synthetic"}}),
+                "note": ("POST", "/activities", {
+                    "json": {"activity_type": "NOTE", "note": "Synthetic"},
+                    "headers": {"Idempotency-Key": str(uuid4())},
+                }),
             }
             method, suffix, kwargs = calls[operation]
             with ThreadPoolExecutor(max_workers=1) as pool:

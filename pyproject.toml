@@ -35,3 +35,6 @@ known-first-party = ["meta_kpi_calc"]
 quote-style = "double"
 indent-style = "space"
 
+
+[tool.setuptools.package-data]
+"meta_kpi_calc.auth" = ["assets/*.png"]

@@ -239,7 +239,14 @@ gravar. A consulta de histórico retorna `actor_display_name` quando a conta
 autora tem rótulo configurado, no mesmo escopo SQL do histórico. Atividades
 anteriores sem autor autenticado continuam disponíveis.
 
-O formulário de atividade é substituído após o envio para evitar o reenvio
-do mesmo evento da interface. O POST ainda não tem chave de idempotência.
-Em caso de resposta incerta, consulte o histórico antes de repetir. O envio
-de uma mesma nota em duas abas pode gravar duas atividades distintas.
+A migration `0011_activity_idempotency` acrescenta uma chave única opcional à
+tabela de atividades, preservando as linhas anteriores. O POST de atividades
+exige o cabeçalho `Idempotency-Key` com um UUID por operação. A repetição retorna
+o mesmo registro com `201` quando lead, autor e conteúdo normalizado coincidem
+e a sessão ainda tem acesso ao lead. Reutilização incompatível retorna `409`.
+
+O Streamlit mantém chave e conteúdo da tentativa na sessão enquanto houver
+uma resposta incerta e oferece um botão de retentativa. Uma sessão de interface
+perdida por completo não conserva a tentativa. Nesse caso, consulte o
+histórico antes de enviar de novo. Operações distintas, inclusive em abas
+diferentes, podem ter o mesmo conteúdo.

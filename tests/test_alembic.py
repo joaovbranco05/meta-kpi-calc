@@ -43,7 +43,7 @@ def test_alembic_domain_schema_is_persisted_and_reversible(tmp_path: Path) -> No
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-    assert revision == ("0010_user_display_name",)
+    assert revision == ("0011_activity_idempotency",)
     assert "qualified_leads" in columns
     assert {
         "campaigns",

@@ -106,6 +106,11 @@ def test_login_csrf_expiry_logout_and_replay(migrated_database):
     with db.session_factory.begin() as session:
         session.add(AppUser(issuer=ISSUER, subject="subject", role="usuario", active=True))
     with TestClient(app, base_url=ORIGIN, follow_redirects=False) as client:
+        entry = client.get("/auth/edge-entry")
+        assert entry.status_code == 401
+        assert "Portal Comercial" in entry.text and 'href="/auth/login"' in entry.text
+        assert "data:image/png;base64," in entry.text
+        assert "default-src 'none'" in entry.headers["content-security-policy"]
         params = begin(client, provider, "first")
         with TestClient(app, base_url=ORIGIN, follow_redirects=False) as other:
             assert other.get("/auth/callback", params=params).status_code == 400
@@ -135,6 +140,7 @@ def test_login_csrf_expiry_logout_and_replay(migrated_database):
         form = client.get("/auth/logout")
         assert form.status_code == 200
         assert form.headers["referrer-policy"] == "same-origin"
+        assert "Confirmar saída" in form.text and "form-action 'self'" in form.headers["content-security-policy"]
         assert client.get("/auth/session").status_code == 200
         assert (
             client.post(

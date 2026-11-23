@@ -80,3 +80,20 @@
     font-size: 0.875rem;
     margin: 0.4rem 0 0;
 }
+
+.crm-history-heading {
+    border-top: 1px solid var(--crm-line);
+    margin: 0;
+    padding-top: 0.5rem;
+}
+
+.crm-history-heading small {
+    color: var(--crm-muted);
+    margin-inline-start: 0.4rem;
+}
+
+.crm-report-link,
+.crm-report-link:visited {
+    color: var(--crm-brand);
+    text-underline-offset: 0.2em;
+}

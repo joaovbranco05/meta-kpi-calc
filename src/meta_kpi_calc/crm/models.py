@@ -140,6 +140,7 @@ class LeadActivity(Base):
             name="ck_lead_activities_status_payload",
         ),
         Index("ix_lead_activities_lead_created", "lead_id", "created_at"),
+        Index("uq_lead_activity_operation", "idempotency_key", unique=True),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -167,6 +168,7 @@ class LeadActivity(Base):
              create_constraint=False, validate_strings=True, values_callable=_enum_values)
     )
     note: Mapped[str | None] = mapped_column(Text)
+    idempotency_key: Mapped[str | None] = mapped_column(String(36))
     changed_fields: Mapped[str | None] = mapped_column(String(512))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()
