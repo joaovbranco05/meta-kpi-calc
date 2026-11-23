@@ -55,6 +55,7 @@ class LeadResponse(CRMModel):
     course: str | None
     campaign_id: int | None
     assigned_user_id: int | None
+    assigned_user_display_name: str | None
     commercial_status: LeadStatus
     last_contact_at: datetime | None
     created_at: datetime
@@ -199,6 +200,7 @@ def create_activity(lead_id: int, payload: ActivityCreate, session: SessionDepen
 
 class AssignmentPatch(CRMModel):
     assigned_user_id: int | None = Field(gt=0)
+    expected_assigned_user_id: int | None = Field(default=None, gt=0)
 
 
 @router.patch("/leads/{lead_id}/assignment", response_model=LeadResponse)
@@ -207,19 +209,24 @@ def assign_lead(
 ) -> LeadResponse:
     lock_user_management(session, admin)
     lead = _scoped_lead(session, lead_id, admin, writing=True)
+    previous = lead.assigned_user_id
+    if "expected_assigned_user_id" in payload.model_fields_set and previous != payload.expected_assigned_user_id:
+        raise HTTPException(409, "Lead assignment changed")
     target_id = payload.assigned_user_id
+    target = None
     if target_id is not None:
         target = session.get(AppUser, target_id)
         if target is None or not target.active:
             raise HTTPException(404, "Active assignee not found")
-    previous = lead.assigned_user_id
     if previous != target_id:
-        lead.assigned_user_id = target_id
+        lead.assigned_user = target
         session.add(AdminAudit(
             actor_user_id=admin.id, target_user_id=target_id, lead_id=lead.id,
             action="lead_assigned",
             previous_value=str(previous) if previous is not None else None,
             new_value=str(target_id) if target_id is not None else None,
         ))
+    session.flush()
+    result = LeadResponse.model_validate(lead)
     session.commit()
-    return LeadResponse.model_validate(lead)
+    return result

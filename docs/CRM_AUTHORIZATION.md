@@ -213,16 +213,20 @@ Use TLS confiável para o teste no Chrome. Para um laboratório sem alterar a
 confiança do sistema, valide o certificado local explicitamente no cliente
 de teste HTTP/WebSocket. Não prossiga através de avisos de certificado.
 
-### Nome de exibição na Fase 5C
+### Distribuição na Fase 5C.2
 
-A próxima etapa da distribuição comercial poderá incluir um `display_name`
-interno e opcional para os responsáveis. Validar o comprimento, restringir a
-edição ao administrador e usar o valor somente como rótulo. A identidade
-continua vinculada por `iss` e `sub`, que não devem aparecer como nomes no
-seletor. A migration, a alteração da API e os testes ficam para a Fase 5C.
+A migration `0010_user_display_name` acrescenta um nome opcional de até 64
+caracteres. `PATCH /api/admin/users/{id}/display-name` atualiza apenas o nome
+e audita a alteração sem revogar a sessão. Use o ID interno registrado no
+provisionamento para configurar o primeiro nome pelo Streamlit. O rótulo é
+independente de `iss` e `sub`.
 
-A listagem e a ficha comercial aceitam futuramente o campo opcional
-`assigned_user_display_name` em `LeadResponse`, derivado no servidor do
-responsável atual e disponível somente quando o solicitante puder ver o rótulo.
-Em 5C.1 o campo ainda não é enviado. A interface distingue «Sem responsável»
-de «Nome indisponível» sem tentar resolver IDs por outra rota.
+`GET /api/admin/users/assignees` retorna somente ID interno, perfil e nome das
+contas ativas. A API preserva a elegibilidade existente para qualquer conta
+ativa, inclusive administradores. Na interface, contas sem nome ou com rótulo
+ambíguo precisam ser diferenciadas antes de aparecerem no seletor. O
+`LeadResponse` retorna o nome do responsável no escopo já autorizado do lead.
+
+A atribuição aceita `expected_assigned_user_id` para detectar concorrência.
+Envie `null` se o lead estiver sem responsável. Se o responsável mudou, a API
+retorna `409`. Clientes existentes podem omitir a condição.

@@ -1,8 +1,9 @@
 """Read-only lead list, detail, and activity queries."""
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
+from meta_kpi_calc.auth.models import AppUser
 from meta_kpi_calc.crm.models import Lead, LeadActivity, LeadStatus
 
 
@@ -37,6 +38,7 @@ def list_leads(
     total = session.scalar(select(func.count(Lead.id)).where(*predicates)) or 0
     items = session.scalars(
         select(Lead)
+        .options(joinedload(Lead.assigned_user).load_only(AppUser.display_name))
         .where(*predicates)
         .order_by(Lead.created_at.desc(), Lead.id.desc())
         .offset(offset)
@@ -46,7 +48,7 @@ def list_leads(
 
 
 def get_lead(session: Session, lead_id: int) -> Lead | None:
-    return session.get(Lead, lead_id)
+    return session.get(Lead, lead_id, options=[joinedload(Lead.assigned_user).load_only(AppUser.display_name)])
 
 
 def list_lead_activities(

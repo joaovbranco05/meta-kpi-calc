@@ -43,7 +43,7 @@ def test_alembic_domain_schema_is_persisted_and_reversible(tmp_path: Path) -> No
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-    assert revision == ("0009_browser_context",)
+    assert revision == ("0010_user_display_name",)
     assert "qualified_leads" in columns
     assert {
         "campaigns",
@@ -152,3 +152,20 @@ def test_lead_ads_migration_preserves_phase_one_rows_and_matches_metadata(tmp_pa
         assert connection.execute("SELECT meta_lead_id, commercial_status FROM leads").fetchone() == ("synthetic-migration-id", "CONTACTED")
         assert "meta_page_id" not in {row[1] for row in connection.execute("PRAGMA table_info(leads)")}
     run_alembic(project_root, database, "upgrade", "head")
+
+
+def test_display_name_migration_preserves_existing_user(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    database = tmp_path / "display-name.db"
+    run_alembic(root, database, "upgrade", "0009_browser_context")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO app_users (id, issuer, subject, role, active) "
+            "VALUES (7, 'https://issuer.invalid', 'legacy-account', 'usuario', true)"
+        )
+    run_alembic(root, database, "upgrade", "head")
+    with sqlite3.connect(database) as connection:
+        user = connection.execute(
+            "SELECT id, issuer, subject, role, active, display_name FROM app_users"
+        ).fetchone()
+    assert user == (7, "https://issuer.invalid", "legacy-account", "usuario", 1, None)

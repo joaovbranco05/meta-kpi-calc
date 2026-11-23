@@ -108,6 +108,10 @@ class Lead(Base):
     assigned_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_users.id"), index=True)
     assigned_user: Mapped[AppUser | None] = relationship()
 
+    @property
+    def assigned_user_display_name(self) -> str | None:
+        return self.assigned_user.display_name if self.assigned_user is not None else None
+
     campaign = relationship("Campaign", backref="leads")
     activities: Mapped[list[LeadActivity]] = relationship(
         back_populates="lead", order_by="LeadActivity.created_at, LeadActivity.id"

@@ -27,6 +27,7 @@ class AppUser(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     issuer: Mapped[str] = mapped_column(String(255))
     subject: Mapped[str] = mapped_column(String(255))
+    display_name: Mapped[str | None] = mapped_column(String(64))
     role: Mapped[str] = mapped_column(String(16))
     active: Mapped[bool] = mapped_column(Boolean)
     auth_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

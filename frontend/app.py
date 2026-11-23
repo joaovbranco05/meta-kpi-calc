@@ -1091,7 +1091,75 @@ def _responsible_label(lead: dict[str, Any]) -> str:
     if lead.get("assigned_user_id") is None:
         return "Sem responsável"
     label = lead.get("assigned_user_display_name")
-    return label.strip() if isinstance(label, str) and label.strip() else "Nome indisponível"
+    return label.strip() if isinstance(label, str) and label.strip() else "Nome não definido"
+
+
+def _assignee_names(st: Any, client: httpx.Client) -> None:
+    with st.expander("Configurar nome de exibição"):
+        with st.form("crm_display_name"):
+            st.caption("Use o ID interno registrado no provisionamento da conta.")
+            account_id = st.number_input("ID interno da conta", min_value=1, step=1, value=None)
+            name = st.text_input("Nome de exibição", max_chars=64)
+            submitted = st.form_submit_button("Salvar nome")
+        if submitted:
+            if account_id is None:
+                st.warning("Informe o ID interno da conta.")
+                return
+            result, error = _request_result(
+                client, "PATCH", f"/api/admin/users/{account_id}/display-name",
+                json={"display_name": name.strip() or None},
+            )
+            if result is None:
+                st.error(_error_message(error))
+                return
+            st.success("Nome de exibição atualizado.")
+
+
+def _lead_assignment(st: Any, client: httpx.Client, lead: dict[str, Any]) -> None:
+    st.subheader("Distribuição")
+    current = lead["assigned_user_id"]
+    st.text(_responsible_label(lead))
+    candidates, error = _request_result(client, "GET", "/api/admin/users/assignees")
+    if candidates is None:
+        st.error(_error_message(error))
+        return
+    labels = {
+        item["id"]: item["display_name"] + (" (administrador)" if item["role"] == "admin" else "")
+        for item in candidates if item["display_name"]
+    }
+    names = list(labels.values())
+    if len(names) != len(set(names)) or len(labels) < len(candidates):
+        st.caption("Configure nomes distintos para disponibilizar as contas no seletor.")
+    choices = [
+        account_id for account_id, name in labels.items()
+        if account_id != current and names.count(name) == 1
+    ]
+    with st.form(f"crm_assignment_{lead['id']}_{current}"):
+        choice = st.selectbox(
+            "Novo responsável", choices, index=None,
+            format_func=labels.__getitem__,
+        )
+        remove = st.checkbox("Retirar responsável") if current is not None else False
+        confirmed = st.checkbox("Confirmo a alteração do responsável atual") if current is not None else True
+        submitted = st.form_submit_button("Salvar atribuição", type="primary")
+    if not submitted:
+        return
+    if not confirmed or (choice is not None and remove) or (choice is None and not remove):
+        st.warning("Escolha uma única alteração e confirme quando houver responsável atual.")
+        return
+    _, error = _request_result(
+        client, "PATCH", f"/api/crm/leads/{lead['id']}/assignment",
+        json={"assigned_user_id": choice, "expected_assigned_user_id": current},
+    )
+    code = error.get("status") if isinstance(error, dict) else error
+    if code == "409":
+        st.session_state["crm_assignment_notice"] = ("warning", "A atribuição mudou. Revise o responsável atual.")
+        st.rerun()
+    if error is not None:
+        st.error("Não foi possível salvar a atribuição. Confira o responsável atual antes de repetir.")
+        return
+    st.session_state["crm_assignment_notice"] = ("success", "Atribuição atualizada.")
+    st.rerun()
 
 
 def _lead_detail(st: Any, client: httpx.Client, lead_id: int, *, is_admin: bool) -> None:
@@ -1104,6 +1172,12 @@ def _lead_detail(st: Any, client: httpx.Client, lead_id: int, *, is_admin: bool)
         _lead_request_error(st, error, detail=True)
         return
 
+    if notice := st.session_state.pop("crm_assignment_notice", None):
+        level, message = notice
+        if level == "success":
+            st.success(message)
+        else:
+            st.warning(message)
     name = escape(lead.get("full_name") or "Lead sem nome")
     status = lead["commercial_status"]
     label = escape(LEAD_STATUS_LABELS.get(status, status))
@@ -1127,10 +1201,12 @@ def _lead_detail(st: Any, client: httpx.Client, lead_id: int, *, is_admin: bool)
             if lead.get("meta_campaign_name"):
                 st.caption("Campanha")
                 st.text(lead["meta_campaign_name"], width="stretch")
-            if is_admin or (lead.get("assigned_user_id") is not None
-                            and lead.get("assigned_user_display_name")):
+            if not is_admin and lead.get("assigned_user_display_name"):
                 st.caption("Responsável")
                 st.text(_responsible_label(lead), width="stretch")
+
+    if is_admin:
+        _lead_assignment(st, client, lead)
 
 
 def _lead_list(st: Any, client: httpx.Client, title: str, *, is_admin: bool) -> None:
@@ -1143,6 +1219,8 @@ def _lead_list(st: Any, client: httpx.Client, title: str, *, is_admin: bool) -> 
         f'{"Carteira comercial da RCTEC" if is_admin else "Sua carteira de atendimento"}'
         '</p></header>'
     )
+    if is_admin:
+        _assignee_names(st, client)
     filters = _lead_query_controls(st, is_admin=is_admin)
     limit = 25
     offset = st.session_state.get("crm_leads_offset", 0)

@@ -2,9 +2,10 @@
 
 from datetime import UTC, datetime
 from typing import Literal
+from unicodedata import category
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
@@ -35,6 +36,31 @@ class UserView(UserCreate):
 
     id: int
     active: bool
+    display_name: str | None = None
+
+
+class AssigneeView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    role: Role
+    display_name: str | None
+
+
+class DisplayNamePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    display_name: str | None = Field(min_length=1, max_length=64)
+
+    @field_validator("display_name")
+    @classmethod
+    def validate_name(cls, value: str | None) -> str | None:
+        if value is not None and (
+            not any(char.isalnum() for char in value)
+            or any(category(char)[0] == "C" or char in "\u2028\u2029" for char in value)
+        ):
+            raise ValueError("Invalid display name")
+        return value
 
 
 def account_clock(session: SessionDependency) -> datetime:
@@ -91,6 +117,36 @@ def create_user(payload: UserCreate, session: SessionDependency, admin: CurrentA
     except IntegrityError:
         session.rollback()
         raise HTTPException(409, "Identity already registered") from None
+    return result
+
+
+@router.get("/assignees", response_model=list[AssigneeView])
+def list_assignees(session: SessionDependency, _admin: CurrentAdmin) -> list[AssigneeView]:
+    # Match the assignment policy: all active accounts, including administrators.
+    rows = session.execute(
+        select(AppUser.id, AppUser.role, AppUser.display_name)
+        .where(AppUser.active.is_(True))
+        .order_by(AppUser.display_name.asc().nulls_last(), AppUser.id)
+    )
+    return [AssigneeView.model_validate(row) for row in rows]
+
+
+@router.patch("/{user_id}/display-name", response_model=AssigneeView)
+def update_display_name(
+    user_id: int, payload: DisplayNamePatch, session: SessionDependency, admin: CurrentAdmin,
+) -> AssigneeView:
+    lock_user_management(session, admin)
+    user = session.get(AppUser, user_id)
+    if user is None:
+        raise HTTPException(404, "User not found")
+    if user.display_name != payload.display_name:
+        session.add(AdminAudit(
+            actor_user_id=admin.id, target_user_id=user.id, action="display_name_updated",
+            previous_value=user.display_name, new_value=payload.display_name,
+        ))
+        user.display_name = payload.display_name
+    result = AssigneeView.model_validate(user)
+    session.commit()
     return result
 
 

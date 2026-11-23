@@ -17,6 +17,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import URL, make_url
 
+from meta_kpi_calc.auth.models import AppUser
 from meta_kpi_calc.core.config import Settings
 from meta_kpi_calc.db.session import Database
 from meta_kpi_calc.db.migrate_sqlite import migrate_snapshot
@@ -101,7 +102,7 @@ def test_schema_and_upgrade_idempotent(pg_database):
     settings, database = pg_database
     with database.engine.connect() as connection:
         assert int(connection.scalar(text("SHOW server_version_num"))) // 10000 == 17
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0009_browser_context"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0010_user_display_name"
     env = os.environ.copy()
     url = make_url(settings.demo_database_url).set(password="synthetic%:password")
     env.update(DEMO_MODE="true", DATABASE_URL=settings.database_url,
@@ -246,6 +247,7 @@ def test_standalone_postgresql_write_failure_returns_503(pg_database):
 
 @pytest.mark.parametrize("check", [
     test_authorization.test_permissions_and_audit,
+    test_authorization.test_named_distribution,
     test_authorization.test_expired_and_inactive_sessions,
     test_authorization.test_concurrent_admin_deactivation_keeps_one_active,
 ])
@@ -281,8 +283,18 @@ def test_authorization_migration_preserves_postgresql_history(pg_database, tmp_p
             "INSERT INTO lead_activities (lead_id, activity_type, actor_type, actor_id, note) "
             "VALUES (:lead_id, 'NOTE', 'LOCAL_OPERATOR', 'legacy-actor', 'Synthetic note')"
         ), {"lead_id": lead_id})
+    migrate("upgrade", "0009_browser_context")
+    with database.engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO app_users (issuer, subject, role, active) "
+            "VALUES ('https://fixture.invalid', 'existing-seller', 'usuario', true)"
+        ))
     migrate("upgrade", "head")
     with database.session_factory() as session:
+        account = session.scalar(select(AppUser))
+        assert (account.subject, account.role, account.active, account.display_name) == (
+            "existing-seller", "usuario", True, None,
+        )
         lead = session.get(Lead, lead_id)
         activity, = lead.activities
         assert lead.commercial_status == LeadStatus.CONTACTED

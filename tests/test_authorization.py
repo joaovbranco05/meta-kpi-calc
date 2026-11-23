@@ -305,3 +305,64 @@ def test_administrative_audit_failure_rolls_back(migrated_database):
         assert session.get(AppUser, target[0]).role == "usuario"
         assert session.scalar(select(func.count()).select_from(AppUser)) == 2
         assert session.scalar(select(func.count()).select_from(AdminAudit)) == 0
+
+
+def test_named_distribution(migrated_database):
+    settings, database = migrated_database
+    with database.session_factory.begin() as session:
+        admin = _account(session, "admin", "admin")
+        first = _account(session, "usuario", "first")
+        second = _account(session, "usuario", "second")
+        inactive = _account(session, "usuario", "inactive")
+        user = session.get(AppUser, inactive[0])
+        user.active = False
+        lead_id = ingest_lead(session, LeadSubmission("551", {"full_name": "Lead fictício"})).lead.id
+
+    users = "/api/admin/users"
+    name_url = f"{users}/{first[0]}/display-name"
+    lead = f"/api/crm/leads/{lead_id}"
+    assignment = f"{lead}/assignment"
+    with TestClient(create_app(settings)) as client:
+        _login(client, first)
+        assert client.patch(name_url, json={"display_name": "Vendedor A"}).status_code == 403
+        assert client.get(f"{users}/assignees").status_code == 403
+        _login(client, admin)
+        for invalid in ("  ", "A\nB", "A" * 65, "--"):
+            assert client.patch(name_url, json={"display_name": invalid}).status_code == 422
+        assert client.patch(name_url, json={"display_name": "  Vendedor A  "}).json() == {
+            "id": first[0], "display_name": "Vendedor A", "role": "usuario",
+        }
+        assert client.patch(f"{users}/{second[0]}/display-name", json={"display_name": "Vendedor B"}).status_code == 200
+        candidates = client.get(f"{users}/assignees").json()
+        assert {item["id"] for item in candidates} == {admin[0], first[0], second[0]}
+        assert all(set(item) == {"id", "role", "display_name"} for item in candidates)
+        for invalid in (inactive[0], 99999):
+            assert client.patch(assignment, json={"assigned_user_id": invalid}).status_code == 404
+
+        def assign(target, expected):
+            return client.patch(assignment, json={
+                "assigned_user_id": target, "expected_assigned_user_id": expected,
+            })
+
+        assert assign(first[0], None).json()["assigned_user_display_name"] == "Vendedor A"
+        assert client.get("/api/crm/leads").json()["items"][0]["assigned_user_display_name"] == "Vendedor A"
+        _login(client, first)
+        assert client.get(lead).json()["assigned_user_display_name"] == "Vendedor A"
+        _login(client, admin)
+        assert assign(second[0], None).status_code == 409
+        assert assign(second[0], first[0]).json()["assigned_user_display_name"] == "Vendedor B"
+        _login(client, first)
+        assert client.get(lead).status_code == 404
+        assert client.get("/api/crm/leads").json()["total"] == 0
+        _login(client, second)
+        assert client.get(lead).status_code == 200
+        _login(client, admin)
+        assert assign(None, second[0]).json()["assigned_user_display_name"] is None
+        _login(client, second)
+        assert client.get(lead).status_code == 404
+
+    with database.session_factory() as session:
+        events = session.scalars(select(AdminAudit).order_by(AdminAudit.id)).all()
+        assert [event.action for event in events] == ["display_name_updated"] * 2 + ["lead_assigned"] * 3
+        assert events[0].new_value == "Vendedor A"
+        assert events[-1].previous_value == str(second[0]) and events[-1].new_value is None
