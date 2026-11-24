@@ -1,11 +1,13 @@
 import logging
 
 import httpx
-from conftest import create_admin_test_app as create_app
+from conftest import create_admin_test_app
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import select
+from test_authorization import _account, _login
 
+from meta_kpi_calc.api.app import create_app
 from meta_kpi_calc.core.config import Settings
 from meta_kpi_calc.db.models import Campaign, CampaignInsight, SyncRun
 from meta_kpi_calc.db.session import Database
@@ -30,6 +32,8 @@ def test_mocked_external_token_never_reaches_public_or_persisted_outputs(
     caplog,
 ) -> None:
     base, database = migrated_database
+    with database.session_factory.begin() as session:
+        admin = _account(session, "admin", "hardening-sync")
 
     def meta_response(request: httpx.Request) -> httpx.Response:
         headers = {"x-business-use-case-usage": f'{{"secret":"{TOKEN}"}}'}
@@ -84,6 +88,7 @@ def test_mocked_external_token_never_reaches_public_or_persisted_outputs(
         caplog.set_level(logging.INFO)
         app = create_app(_real_settings(base), http_client=external)
         with TestClient(app) as client:
+            _login(client, admin)
             synced = client.post(
                 "/api/meta/sync",
                 json={"date_start": "2026-09-01", "date_stop": "2026-09-01"},
@@ -135,7 +140,7 @@ def test_demo_smoke_covers_api_and_export_without_credentials(
     }
     day = DEMO_START_DATE.isoformat()
 
-    with TestClient(create_app(settings)) as client:
+    with TestClient(create_admin_test_app(settings)) as client:
         responses = [
             client.get("/health"),
             client.get("/api/meta/connection"),
