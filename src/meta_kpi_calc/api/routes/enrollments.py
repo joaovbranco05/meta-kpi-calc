@@ -56,7 +56,7 @@ def create_enrollment(
     payload: EnrollmentWrite, session: SessionDependency
 ) -> EnrollmentResponse:
     try:
-        with session.begin():
+        with session.begin_nested():
             campaign = session.get(Campaign, payload.campaign_id)
             if campaign is None:
                 _error(404, "campaign_not_found", "Campaign was not found.")
@@ -72,6 +72,7 @@ def create_enrollment(
             session.add(enrollment)
             session.flush()
             response = _enrollment_response(enrollment, campaign.meta_campaign_id)
+        session.commit()
         return response
     except IntegrityError:
         _error(
@@ -141,7 +142,7 @@ def replace_enrollment(
     session: SessionDependency,
 ) -> EnrollmentResponse:
     try:
-        with session.begin():
+        with session.begin_nested():
             enrollment = session.get(EnrollmentRecord, record_id)
             if enrollment is None:
                 _error(404, "enrollment_not_found", "Enrollment was not found.")
@@ -161,6 +162,7 @@ def replace_enrollment(
             _apply_enrollment(enrollment, payload)
             session.flush()
             response = _enrollment_response(enrollment, campaign.meta_campaign_id)
+        session.commit()
         return response
     except IntegrityError:
         _error(409, "duplicate_enrollment", "Enrollment already exists.")
@@ -177,7 +179,7 @@ def replace_commercial_closure(
     session: SessionDependency,
 ) -> CommercialClosureResponse:
     try:
-        with session.begin():
+        with session.begin_nested():
             campaign = session.get(Campaign, campaign_id)
             if campaign is None:
                 _error(404, "campaign_not_found", "Campaign was not found.")
@@ -198,6 +200,7 @@ def replace_commercial_closure(
                 closure.status = payload.status
             session.flush()
             response = _commercial_closure_response(closure, campaign.meta_campaign_id)
+        session.commit()
         return response
     except IntegrityError:
         closure = session.scalar(
@@ -211,4 +214,6 @@ def replace_commercial_closure(
         campaign = session.get(Campaign, campaign_id)
         if campaign is None:
             raise
-        return _commercial_closure_response(closure, campaign.meta_campaign_id)
+        response = _commercial_closure_response(closure, campaign.meta_campaign_id)
+        session.commit()
+        return response

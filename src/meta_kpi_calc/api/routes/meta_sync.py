@@ -2,11 +2,12 @@
 
 import logging
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from meta_kpi_calc.api.dependencies import get_session
+from meta_kpi_calc.api.routes._shared import SessionDependency, _error
 from meta_kpi_calc.api.schemas import (
     AccountResponse,
     ConnectionResponse,
@@ -14,10 +15,10 @@ from meta_kpi_calc.api.schemas import (
     SyncResponse,
     SyncStatusResponse,
 )
+from meta_kpi_calc.auth.dependencies import authenticate_session, lock_accounts, require_admin
 from meta_kpi_calc.db.models import SyncRun, SyncStatus
-from meta_kpi_calc.api.routes._shared import SessionDependency, _error
 from meta_kpi_calc.services.meta_client import MetaClientError
-from meta_kpi_calc.services.sync_service import SyncServiceError
+from meta_kpi_calc.services.sync_service import SyncAuthorizationError, SyncServiceError
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +64,23 @@ def sync_meta(payload: SyncRequest, request: Request) -> SyncResponse:
     service = request.app.state.sync_service
     if service is None:
         _error(503, "meta_sync_unavailable", "Meta synchronization is unavailable.")
+    def authorize_write(session: Session) -> None:
+        try:
+            lock_accounts(session, shared=True)
+            require_admin(authenticate_session(request, session))
+        except HTTPException as exc:
+            raise SyncAuthorizationError(exc.status_code) from None
+
     try:
         result = service.run_sync(
             payload.date_start,
             payload.date_stop,
             active_only=payload.active_only,
             meta_campaign_id=payload.meta_campaign_id,
+            authorize_write=authorize_write,
         )
+    except SyncAuthorizationError as exc:
+        raise HTTPException(exc.status_code, "Synchronization no longer authorized") from None
     except SyncServiceError as exc:
         if exc.code == "sync_in_progress":
             _error(409, "sync_in_progress", "A synchronization is already in progress.")

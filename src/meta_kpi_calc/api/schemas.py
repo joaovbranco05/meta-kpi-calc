@@ -6,6 +6,7 @@ from typing import Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from meta_kpi_calc.core.text_validation import DatabaseText
 from meta_kpi_calc.db.models import (
     CampaignBrand,
     CommercialClosureStatus,
@@ -82,7 +83,7 @@ class CampaignResponse(ApiModel):
 
 class ClassificationPatch(ApiModel):
     brand: CampaignBrand | None = None
-    course: str | None = None
+    course: DatabaseText | None = None
 
     @field_validator("brand")
     @classmethod
@@ -131,14 +132,14 @@ class InsightResponse(ApiModel):
 class EnrollmentWrite(ApiModel):
     campaign_id: int = Field(strict=True)
     reference_date: date
-    course: str
+    course: DatabaseText
     contracted_enrollments: int = Field(strict=True, ge=0)
     paying_enrollments: int = Field(strict=True, ge=0)
     cancellations: int = Field(strict=True, ge=0)
     expected_revenue: Decimal = Field(ge=0, allow_inf_nan=False)
     received_revenue: Decimal = Field(ge=0, allow_inf_nan=False)
     contribution_margin: Decimal | None = Field(ge=0, allow_inf_nan=False)
-    notes: str | None
+    notes: DatabaseText | None
 
     @field_validator(
         "expected_revenue", "received_revenue", "contribution_margin", mode="before"

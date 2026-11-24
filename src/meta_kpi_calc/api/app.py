@@ -109,7 +109,7 @@ def create_app(
     application.state.sync_service = None
     application.state.scheduler = None
     application.include_router(health_router)
-    application.include_router(rest_router, dependencies=[Depends(require_admin)])
+    application.include_router(rest_router)
     application.include_router(admin_router)
     application.include_router(auth_router)
     application.include_router(crm_router)

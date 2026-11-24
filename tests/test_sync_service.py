@@ -595,3 +595,45 @@ def test_lock_releases_after_failure(
 
     assert result.status is SyncStatus.SUCCESS
     assert sync_run_count(database) == 2
+
+
+def test_manual_sync_rechecks_session_after_simulated_fetch(migrated_database):
+    from fastapi.testclient import TestClient
+    from test_oidc import ORIGIN, Provider, begin, build, logout_context
+
+    from meta_kpi_calc.auth.dependencies import SESSION_COOKIE, csrf_token
+    from meta_kpi_calc.auth.models import AppUser
+    from meta_kpi_calc.auth.oidc import ISSUER
+
+    settings, database = migrated_database
+    provider = Provider()
+    app, _ = build(migrated_database, provider)
+    with database.session_factory.begin() as session:
+        session.add(AppUser(issuer=ISSUER, subject="subject", role="admin", active=True))
+    with (
+        TestClient(app, base_url=ORIGIN, follow_redirects=False) as admin,
+        TestClient(app, base_url=ORIGIN, follow_redirects=False) as logout,
+    ):
+        assert admin.get("/auth/callback", params=begin(admin, provider, "manual-sync")).status_code == 303
+        logout.cookies.update(admin.cookies)
+        client = meta_mock()
+
+        def fetch_after_logout(**_kwargs):
+            assert logout_context(logout).status_code == 303
+            return [meta_campaign()]
+
+        client.list_campaigns.side_effect = fetch_after_logout
+        app.state.sync_service = SyncService(
+            real_settings(settings),
+            database.session_factory,
+            client,
+            now=lambda: NOW,
+        )
+        result = admin.post(
+            "/api/meta/sync", json={"date_start": str(YESTERDAY), "date_stop": str(YESTERDAY)},
+            headers={"Origin": ORIGIN, "X-CSRF-Token": csrf_token(admin.cookies[SESSION_COOKIE])},
+        )
+        assert result.status_code == 401
+    with database.session_factory() as session:
+        assert session.scalar(select(func.count(Campaign.id))) == 0
+        assert session.scalar(select(SyncRun.status)) == SyncStatus.FAILED

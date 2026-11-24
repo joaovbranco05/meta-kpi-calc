@@ -124,20 +124,26 @@ def test_permissions_and_audit(migrated_database):
         )
         assert client.patch(f"{path}/status", json=status_body).status_code == 200
         assert client.patch(f"{path}/status", json=status_body).status_code == 200
-        for invalid_note in ("  ", "x" * 4001):
+        for invalid_note in ("  ", "x" * 4001, "NUL\x00fictício"):
             assert client.post(f"{path}/activities", json={
                 "activity_type": "NOTE", "note": invalid_note,
             }).status_code == 422
-        note = {"activity_type": "NOTE", "note": "Synthetic note"}
+        note = {"activity_type": "NOTE", "note": "Atendimento: São José — inscrição e retorno 🙂"}
         assert (
             client.post(f"{path}/activities", json=note | {"actor_user_id": admin[0]}).status_code
             == 422
         )
+        assert client.post(
+            f"{path}/activities",
+            content=b'{"activity_type":"NOTE","note":"\\ud800"}',
+            headers={"Content-Type": "application/json"},
+        ).status_code == 422
         assert client.post(f"{path}/activities", json=note).json()["actor_user_id"] == operator[0]
         history = client.get(f"{path}/activities").json()
         assert [row["actor_user_id"] for row in history] == [None, operator[0], operator[0]]
         assert [row["actor_display_name"] for row in history] == [None, "Vendedor fictício", "Vendedor fictício"]
         assert [row["activity_type"] for row in history] == ["IMPORTED", "STATUS_CHANGED", "NOTE"]
+        assert history[-1]["note"] == note["note"]
 
         _login(client, admin)
         assert client.get("/api/campaigns").status_code == 200

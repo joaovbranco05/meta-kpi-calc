@@ -13,13 +13,14 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import delete, select, update
 
-from meta_kpi_calc.auth.admin import account_clock, lock_accounts
+from meta_kpi_calc.auth.admin import account_clock
 from meta_kpi_calc.auth.dependencies import (
     BROWSER_COOKIE,
     SESSION_COOKIE,
     CurrentUser,
     SessionDependency,
     csrf_token,
+    lock_accounts,
     session_binding,
     session_digest,
     valid_cookie,

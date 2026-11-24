@@ -46,11 +46,29 @@ A consulta de histórico aplica o escopo do responsável na própria instrução
 Uma leitura iniciada antes do commit de uma reatribuição ainda vê seu snapshot;
 leituras iniciadas depois do commit respeitam a nova atribuição.
 
-O PostgreSQL da aplicação usa **READ COMMITTED**. A alteração de contas e a
-atribuição de leads passam pelo mesmo bloqueio transacional, com revalidação
-do administrador após adquirir o bloqueio. Essas operações falham de forma
-segura se a conexão usar outro isolamento. Não há endpoint de exclusão de conta.
-Ferramentas futuras que alterem contas devem preservar esse mesmo protocolo.
+O PostgreSQL da aplicação usa **READ COMMITTED**. As operações protegidas
+adquirem primeiro o bloqueio transacional de contas e sessões. A API valida
+a sessão, o perfil e o CSRF depois de adquirir esse bloqueio. Em seguida,
+adquire os bloqueios de domínio, como o do lead, e os mantém até o commit ou
+rollback. No SQLite, a API adquire a reserva de escrita antes da autenticação.
+
+No PostgreSQL, atendimento e gravações locais de Analytics usam o bloqueio
+**compartilhado**, permitindo escritas em leads diferentes. Logout, emissão
+de sessão, mudanças administrativas de conta e atribuição de leads usam modo
+**exclusivo**. Cada caminho escolhe o modo antes da primeira aquisição, sem
+promover um bloqueio compartilhado durante a transação. A autorização de
+escopo e a consulta da chave de idempotência ficam depois desses controles.
+Se a revogação confirma primeiro, a operação aguarda e recebe `401`. Se a
+operação confirma primeiro, a revogação prossegue após o commit.
+
+A sincronização manual de Analytics revalida o administrador dentro das
+transações que iniciam o registro e persistem campanhas e métricas, sem
+reter o bloqueio durante as chamadas externas. A finalização do registro
+da execução é contabilidade interna, inclusive em caso de revogação. O
+scheduler usa o fluxo independente da identidade humana.
+
+Não há endpoint de exclusão de conta. Ferramentas futuras que alterem
+contas devem preservar esse protocolo.
 
 ### Papéis PostgreSQL
 
@@ -250,3 +268,13 @@ uma resposta incerta e oferece um botão de retentativa. Uma sessão de interfac
 perdida por completo não conserva a tentativa. Nesse caso, consulte o
 histórico antes de enviar de novo. Operações distintas, inclusive em abas
 diferentes, podem ter o mesmo conteúdo.
+
+
+### Pendências posteriores à Fase 5E.1
+
+- Reduzir os campos retornados pela listagem e pelo histórico conforme os consumidores.
+- Avaliar `StrEnum` com testes de serialização antes de alterar enums existentes.
+- Tratar os apontamentos preexistentes do Ruff em uma revisão separada.
+- A perda completa da sessão Streamlit descarta a tentativa pendente. O
+  abandono voluntário também descarta a chave local e não desfaz uma gravação
+  já confirmada. A interface orienta conferir o histórico antes de um novo envio.

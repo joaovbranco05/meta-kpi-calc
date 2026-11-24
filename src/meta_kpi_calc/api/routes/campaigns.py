@@ -91,16 +91,16 @@ def classify_campaign(
     payload: ClassificationPatch,
     session: SessionDependency,
 ) -> CampaignResponse:
-    with session.begin():
-        campaign = session.get(Campaign, campaign_id)
-        if campaign is None:
-            _error(404, "campaign_not_found", "Campaign was not found.")
-        if "brand" in payload.model_fields_set:
-            campaign.brand = payload.brand
-        if "course" in payload.model_fields_set:
-            campaign.course = payload.course
-        session.flush()
-        response = _campaign_response(campaign)
+    campaign = session.get(Campaign, campaign_id)
+    if campaign is None:
+        _error(404, "campaign_not_found", "Campaign was not found.")
+    if "brand" in payload.model_fields_set:
+        campaign.brand = payload.brand
+    if "course" in payload.model_fields_set:
+        campaign.course = payload.course
+    session.flush()
+    response = _campaign_response(campaign)
+    session.commit()
     return response
 
 

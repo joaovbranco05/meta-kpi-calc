@@ -336,7 +336,10 @@ def test_reassignment_commits_before_scoped_operation(pg_database, operation):
 
     def pause_before_statement(_conn, _cursor, sql, *_args):
         sql = sql.lower()
-        scoped = "left outer join lead_activities" in sql if operation == "history" else sql.startswith("update leads")
+        scoped = (
+            "left outer join lead_activities" in sql if operation == "history"
+            else "pg_advisory_xact_lock_shared" in sql
+        )
         if scoped:
             waiting.set()
             assert resume.wait(10)
@@ -524,3 +527,156 @@ def test_oidc_logout_callback_race_on_postgresql(pg_database, logout_first):
     from test_oidc import test_logout_fences_callback_in_both_commit_orders
 
     test_logout_fences_callback_in_both_commit_orders(pg_database, logout_first)
+
+
+@pytest.mark.parametrize(("operation", "revoke"), [
+    ("activity", "logout"),
+    ("replay", "logout"),
+    ("status", "logout"),
+    ("activity", "promote"),
+    ("activity", "demote"),
+    ("activity", "disable"),
+    ("activity", "reassign"),
+    ("assignment", "logout"),
+    ("display_name", "logout"),
+    ("classification", "logout"),
+])
+@pytest.mark.parametrize("mutation_first", [True, False])
+def test_session_changes_order_with_mutation(pg_database, operation, revoke, mutation_first):
+    """Pause the winner holding its transaction lock; start the loser while it waits."""
+    from threading import Event
+
+    from fastapi.testclient import TestClient
+    from sqlalchemy import event
+    from test_oidc import ORIGIN, Provider, begin, build, logout_context
+
+    from meta_kpi_calc.auth.dependencies import SESSION_COOKIE, csrf_token
+    from meta_kpi_calc.auth.models import AdminAudit, AppSession
+    from meta_kpi_calc.auth.oidc import ISSUER
+
+    _, database = pg_database
+    provider = Provider()
+    mutation_app, _ = build(pg_database, provider)
+    revoke_app, _ = build(pg_database, provider)
+    needs_admin = revoke == "demote" or operation in {"assignment", "display_name", "classification"}
+    with database.session_factory.begin() as session:
+        admin = test_authorization._account(session, "admin", "other-admin")
+        actor = AppUser(
+            issuer=ISSUER, subject="subject", role="admin" if needs_admin else "usuario", active=True,
+        )
+        session.add(actor)
+        session.flush()
+        actor_id = actor.id
+        lead = ingest_lead(session, LeadSubmission("6100", {"full_name": "Fictício"})).lead
+        lead.assigned_user_id = actor_id
+        lead_id = lead.id
+        campaign = Campaign(meta_campaign_id="6200", name="Campanha fictícia")
+        session.add(campaign)
+        session.flush()
+        campaign_id = campaign.id
+
+    with (
+        TestClient(mutation_app, base_url=ORIGIN, follow_redirects=False) as caller,
+        TestClient(revoke_app, base_url=ORIGIN, follow_redirects=False) as revoker,
+    ):
+        params = begin(caller, provider, "simulated")
+        assert caller.get("/auth/callback", params=params).status_code == 303
+        if revoke == "logout":
+            revoker.cookies.update(caller.cookies)
+        else:
+            test_authorization._login(revoker, admin)
+        headers = {
+            "Origin": ORIGIN,
+            "X-CSRF-Token": csrf_token(caller.cookies[SESSION_COOKIE]),
+            "Idempotency-Key": str(uuid4()),
+        }
+        path = f"/api/crm/leads/{lead_id}"
+        activity_call = ("POST", path + "/activities", {"activity_type": "NOTE", "note": "Ação fictícia"})
+        calls = {
+            "activity": activity_call,
+            "replay": activity_call,
+            "status": ("PATCH", path + "/status", {"commercial_status": "CONTACTED"}),
+            "assignment": ("PATCH", path + "/assignment", {"assigned_user_id": admin[0]}),
+            "display_name": ("PATCH", f"/api/admin/users/{actor_id}/display-name", {"display_name": "Gestão"}),
+            "classification": ("PATCH", f"/api/campaigns/{campaign_id}/classification", {"course": "Gestão"}),
+        }
+
+        def mutate():
+            method, url, payload = calls[operation]
+            return caller.request(method, url, headers=headers, json=payload)
+
+        def change_session():
+            if revoke == "logout":
+                return logout_context(revoker)
+            if revoke == "reassign":
+                return revoker.patch(path + "/assignment", json={"assigned_user_id": admin[0]})
+            return revoker.put(
+                f"/api/admin/users/{actor_id}",
+                json={"role": "admin" if revoke == "promote" else "usuario", "active": revoke != "disable"},
+            )
+
+        original = mutate().json()["id"] if operation == "replay" else None
+        acquired, attempting, release = Event(), Event(), Event()
+
+        def hold_first(_conn, _cursor, sql, *_args):
+            if "pg_advisory_xact_lock" in sql:
+                acquired.set()
+                assert release.wait(10)
+
+        def mark_second(_conn, _cursor, sql, *_args):
+            if "pg_advisory_xact_lock" in sql:
+                attempting.set()
+
+        first_engine = (mutation_app if mutation_first else revoke_app).state.database.engine
+        second_engine = (revoke_app if mutation_first else mutation_app).state.database.engine
+        event.listen(first_engine, "after_cursor_execute", hold_first)
+        event.listen(second_engine, "before_cursor_execute", mark_second)
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(mutate if mutation_first else change_session)
+                try:
+                    assert acquired.wait(10)
+                    second = pool.submit(change_session if mutation_first else mutate)
+                    assert attempting.wait(10)
+                    assert not second.done()
+                finally:
+                    release.set()
+                results = first.result(timeout=10), second.result(timeout=10)
+        finally:
+            event.remove(first_engine, "after_cursor_execute", hold_first)
+            event.remove(second_engine, "before_cursor_execute", mark_second)
+
+        mutation, revocation = results if mutation_first else results[::-1]
+        assert revocation.status_code == (303 if revoke == "logout" else 200)
+        assert mutation.status_code == (
+            (201 if operation in {"activity", "replay"} else 200) if mutation_first else (404 if revoke == "reassign" else 401)
+        )
+        if operation == "replay" and mutation_first:
+            assert mutation.json()["id"] == original
+        assert mutate().status_code == (404 if revoke == "reassign" else 401)
+
+    with database.session_factory() as session:
+        revoked_at = session.scalar(select(AppSession.revoked_at).where(AppSession.user_id == actor_id))
+        assert (revoked_at is None) == (revoke == "reassign")
+        lead = session.get(Lead, lead_id)
+        commercial = [entry for entry in lead.activities if entry.actor_user_id is not None]
+        expected_count = int(operation == "replay" or mutation_first and operation in {"activity", "status"})
+        assert len(commercial) == expected_count
+        assert all(entry.actor_user_id == actor_id for entry in commercial)
+        assert lead.commercial_status == (LeadStatus.CONTACTED if mutation_first and operation == "status" else LeadStatus.NEW)
+        assert lead.assigned_user_id == (admin[0] if revoke == "reassign" or mutation_first and operation == "assignment" else actor_id)
+        actions = session.scalars(select(AdminAudit.action).order_by(AdminAudit.id)).all()
+        expected_actions = {
+            "assignment": ["lead_assigned"], "display_name": ["display_name_updated"],
+        }.get(operation, []) if mutation_first else []
+        revision_action = {"reassign": ["lead_assigned"], "logout": []}.get(revoke, ["user_updated"])
+        assert actions == expected_actions + revision_action
+        assert session.get(Campaign, campaign_id).course == (
+            "Gestão" if mutation_first and operation == "classification" else None
+        )
+
+
+def test_manual_sync_authorization_on_postgresql(pg_database):
+    from test_sync_service import test_manual_sync_rechecks_session_after_simulated_fetch
+
+    test_manual_sync_rechecks_session_after_simulated_fetch(pg_database)

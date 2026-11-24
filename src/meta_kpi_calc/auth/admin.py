@@ -6,11 +6,12 @@ from unicodedata import category
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
-from meta_kpi_calc.auth.dependencies import CurrentAdmin, SessionDependency
+from meta_kpi_calc.auth.dependencies import AccountWriter, CurrentAdmin, SessionDependency
 from meta_kpi_calc.auth.models import AdminAudit, AppSession, AppUser
+from meta_kpi_calc.core.text_validation import DatabaseText
 
 router = APIRouter(prefix="/api/admin/users", tags=["Admin"])
 Role = Literal["admin", "usuario"]
@@ -19,8 +20,8 @@ Role = Literal["admin", "usuario"]
 class UserCreate(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    issuer: str = Field(min_length=1, max_length=255)
-    subject: str = Field(min_length=1, max_length=255)
+    issuer: DatabaseText = Field(min_length=1, max_length=255)
+    subject: DatabaseText = Field(min_length=1, max_length=255)
     role: Role
 
 
@@ -50,7 +51,7 @@ class AssigneeView(BaseModel):
 class DisplayNamePatch(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    display_name: str | None = Field(min_length=1, max_length=64)
+    display_name: DatabaseText | None = Field(min_length=1, max_length=64)
 
     @field_validator("display_name")
     @classmethod
@@ -69,26 +70,6 @@ def account_clock(session: SessionDependency) -> datetime:
     return datetime.now(UTC)
 
 
-def lock_accounts(session: SessionDependency) -> None:
-    """Serialize account changes and session issuance."""
-    if session.get_bind().dialect.name == "postgresql":
-        if session.connection().get_isolation_level() != "READ COMMITTED":
-            raise HTTPException(503, "Administrative transaction isolation unavailable")
-        session.execute(text("SELECT pg_advisory_xact_lock(718503120464)"))
-    else:
-        # SQLite serializes writers. Start a write transaction without touching a row.
-        session.execute(update(AppUser).where(AppUser.id.is_(None)).values(active=False))
-
-
-def lock_user_management(session: SessionDependency, admin: AppUser) -> None:
-    lock_accounts(session)
-    session.refresh(admin)
-    if not admin.active:
-        raise HTTPException(401, "Authentication required")
-    if admin.role != "admin":
-        raise HTTPException(403, "Administrator permission required")
-
-
 @router.get("")
 def list_users(session: SessionDependency, _admin: CurrentAdmin) -> list[UserView]:
     return [
@@ -98,8 +79,7 @@ def list_users(session: SessionDependency, _admin: CurrentAdmin) -> list[UserVie
 
 
 @router.post("", status_code=201)
-def create_user(payload: UserCreate, session: SessionDependency, admin: CurrentAdmin) -> UserView:
-    lock_user_management(session, admin)
+def create_user(payload: UserCreate, session: SessionDependency, admin: AccountWriter) -> UserView:
     user = AppUser(**payload.model_dump(), active=True)
     try:
         session.add(user)
@@ -133,9 +113,8 @@ def list_assignees(session: SessionDependency, _admin: CurrentAdmin) -> list[Ass
 
 @router.patch("/{user_id}/display-name", response_model=AssigneeView)
 def update_display_name(
-    user_id: int, payload: DisplayNamePatch, session: SessionDependency, admin: CurrentAdmin,
+    user_id: int, payload: DisplayNamePatch, session: SessionDependency, admin: AccountWriter,
 ) -> AssigneeView:
-    lock_user_management(session, admin)
     user = session.get(AppUser, user_id)
     if user is None:
         raise HTTPException(404, "User not found")
@@ -152,9 +131,8 @@ def update_display_name(
 
 @router.put("/{user_id}")
 def update_user(
-    user_id: int, payload: UserUpdate, session: SessionDependency, admin: CurrentAdmin
+    user_id: int, payload: UserUpdate, session: SessionDependency, admin: AccountWriter
 ) -> UserView:
-    lock_user_management(session, admin)
     user = session.get(AppUser, user_id)
     if user is None:
         raise HTTPException(404, "User not found")

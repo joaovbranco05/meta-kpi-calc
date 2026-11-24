@@ -4,7 +4,7 @@ from decimal import Decimal
 from importlib.util import module_from_spec, spec_from_file_location
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock
 
 import httpx
 import pytest
@@ -250,6 +250,7 @@ def test_sync_maps_result_and_service_errors(
             DAY_2,
             active_only=False,
             meta_campaign_id="campaign-1",
+            authorize_write=ANY,
         )
 
         for code, expected_status, expected_code in (

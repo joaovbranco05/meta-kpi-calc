@@ -34,6 +34,13 @@ class SyncServiceError(Exception):
         self.sync_run_id = sync_run_id
 
 
+class SyncAuthorizationError(Exception):
+    """Manual synchronization lost permission before a database write."""
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+
+
 @dataclass(frozen=True)
 class SyncResult:
     sync_run_id: int
@@ -72,6 +79,7 @@ class SyncService:
         *,
         active_only: bool = True,
         meta_campaign_id: str | None = None,
+        authorize_write: Callable[[Session], None] | None = None,
     ) -> SyncResult:
         requested_campaign_id = self._validate_request(
             date_start, date_stop, meta_campaign_id
@@ -93,11 +101,11 @@ class SyncService:
 
         sync_run_id: int | None = None
         try:
-            sync_run_id = self._start_run(date_start, date_stop, started_at)
+            sync_run_id = self._start_run(date_start, date_stop, started_at, authorize_write)
             campaigns = self._select_campaigns(active_only, requested_campaign_id)
             insights = self._select_insights(campaigns, date_start, date_stop)
             completed_at = self._current_time()
-            self._persist_data(campaigns, insights, completed_at)
+            self._persist_data(campaigns, insights, completed_at, authorize_write)
             self._finish_run(
                 sync_run_id,
                 SyncStatus.SUCCESS,
@@ -114,7 +122,7 @@ class SyncService:
                 record_count=len(insights),
                 is_partial=date_stop == today,
             )
-        except Exception:
+        except Exception as error:
             if sync_run_id is not None:
                 try:
                     failed_at = self._current_time()
@@ -130,6 +138,8 @@ class SyncService:
                     )
                 except Exception:
                     pass
+            if isinstance(error, SyncAuthorizationError):
+                raise
             raise SyncServiceError(
                 _FAILED_MESSAGE,
                 code="sync_failed",
@@ -197,9 +207,12 @@ class SyncService:
             )
 
     def _start_run(
-        self, date_start: date, date_stop: date, started_at: datetime
+        self, date_start: date, date_stop: date, started_at: datetime,
+        authorize_write: Callable[[Session], None] | None,
     ) -> int:
         with self._session_factory.begin() as session:
+            if authorize_write is not None:
+                authorize_write(session)
             sync_run = SyncRun(
                 started_at=started_at,
                 status=SyncStatus.RUNNING,
@@ -255,8 +268,11 @@ class SyncService:
         campaigns: list[MetaCampaign],
         insights: list[MetaInsight],
         synced_at: datetime,
+        authorize_write: Callable[[Session], None] | None,
     ) -> None:
         with self._session_factory.begin() as session:
+            if authorize_write is not None:
+                authorize_write(session)
             local_campaigns: dict[str, Campaign] = {}
             for meta_campaign in campaigns:
                 campaign = session.scalar(

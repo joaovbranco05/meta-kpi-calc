@@ -11,9 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
-from meta_kpi_calc.auth.admin import lock_user_management
-from meta_kpi_calc.auth.dependencies import CurrentAdmin, CurrentUser, SessionDependency
+from meta_kpi_calc.auth.dependencies import AccountWriter, CurrentUser, SessionDependency, WriteUser
 from meta_kpi_calc.auth.models import AdminAudit, AppUser
+from meta_kpi_calc.core.text_validation import DatabaseText
 from meta_kpi_calc.crm.ingestion import add_lead_activity, change_lead_status
 from meta_kpi_calc.crm.models import (
     Lead,
@@ -93,7 +93,7 @@ class StatusPatch(CRMModel):
 
 class ActivityCreate(CRMModel):
     activity_type: LeadActivityType
-    note: str | None = Field(default=None, max_length=4000)
+    note: DatabaseText | None = Field(default=None, max_length=4000)
 
     @field_validator("note")
     @classmethod
@@ -142,7 +142,7 @@ def list_leads(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     commercial_status: LeadStatus | None = None,
     campaign_id: Annotated[int | None, Query(gt=0)] = None,
-    query: Annotated[str | None, Query(max_length=128)] = None,
+    query: Annotated[DatabaseText | None, Query(max_length=128)] = None,
     unassigned: bool = False,
 ) -> Page:
     if unassigned and user.role != "admin":
@@ -169,7 +169,7 @@ def get_lead(lead_id: int, session: SessionDependency, user: CurrentUser) -> Lea
 
 
 @router.patch("/leads/{lead_id}/status", response_model=LeadResponse)
-def patch_lead_status(lead_id: int, payload: StatusPatch, session: SessionDependency, user: CurrentUser) -> LeadResponse:
+def patch_lead_status(lead_id: int, payload: StatusPatch, session: SessionDependency, user: WriteUser) -> LeadResponse:
     lead = _scoped_lead(session, lead_id, user, writing=True)
     try:
         change_lead_status(session, lead, payload.commercial_status, actor_user_id=user.id)
@@ -192,7 +192,7 @@ def list_activities(lead_id: int, session: SessionDependency, user: CurrentUser)
 
 @router.post("/leads/{lead_id}/activities", response_model=ActivityResponse, status_code=status.HTTP_201_CREATED)
 def create_activity(
-    lead_id: int, payload: ActivityCreate, session: SessionDependency, user: CurrentUser,
+    lead_id: int, payload: ActivityCreate, session: SessionDependency, user: WriteUser,
     operation_id: Annotated[UUID, Header(alias="Idempotency-Key")],
 ) -> ActivityResponse:
     lead = _scoped_lead(session, lead_id, user, writing=True)
@@ -229,9 +229,8 @@ class AssignmentPatch(CRMModel):
 
 @router.patch("/leads/{lead_id}/assignment", response_model=LeadResponse)
 def assign_lead(
-    lead_id: int, payload: AssignmentPatch, session: SessionDependency, admin: CurrentAdmin
+    lead_id: int, payload: AssignmentPatch, session: SessionDependency, admin: AccountWriter
 ) -> LeadResponse:
-    lock_user_management(session, admin)
     lead = _scoped_lead(session, lead_id, admin, writing=True)
     previous = lead.assigned_user_id
     if "expected_assigned_user_id" in payload.model_fields_set and previous != payload.expected_assigned_user_id:

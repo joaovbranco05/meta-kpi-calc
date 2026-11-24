@@ -1203,7 +1203,8 @@ def _submit_activity(st: Any, client: httpx.Client, path: str, pending_key: str)
         headers={"Idempotency-Key": operation["key"]},
     )
     code = error.get("status") if isinstance(error, dict) else error
-    if error is None or code in {"403", "404", "409", "422"}:
+    definitive = isinstance(code, str) and code.isdecimal() and 400 <= int(code) < 500 and code != "408"
+    if error is None or definitive:
         del st.session_state[pending_key]
     messages = {
         "403": "Seu perfil não tem permissão para registrar a atividade.",
@@ -1213,7 +1214,7 @@ def _submit_activity(st: Any, client: httpx.Client, path: str, pending_key: str)
     }
     st.session_state["crm_care_notice"] = (
         ("success", "Atividade registrada.") if error is None
-        else ("warning", messages.get(code, "Resposta incerta. Use a opção de reenviar a mesma atividade."))
+        else ("warning", messages.get(code, "O envio foi rejeitado." if definitive else "Resposta incerta. Você pode reenviar a mesma atividade."))
     )
     st.rerun()
 
@@ -1237,9 +1238,18 @@ def _lead_care(st: Any, client: httpx.Client, lead: dict[str, Any]) -> None:
                 save_status = st.form_submit_button("Salvar status")
         with st.container(width=550):
             if pending_key in st.session_state:
-                st.caption("Há uma atividade aguardando confirmação.")
+                st.caption(
+                    "Confira o histórico antes de iniciar outra atividade. "
+                    "Abandonar a tentativa não desfaz uma gravação que já ocorreu."
+                )
                 if st.button("Reenviar a mesma atividade", type="primary"):
                     _submit_activity(st, client, path, pending_key)
+                if st.button("Abandonar tentativa"):
+                    del st.session_state[pending_key]
+                    st.session_state["crm_care_notice"] = (
+                        "warning", "Tentativa abandonada. Confira o histórico antes de registrar outra atividade.",
+                    )
+                    st.rerun()
             else:
                 with st.form(f"crm_activity_{lead_id}_{generation}"):
                     activity = st.selectbox(
